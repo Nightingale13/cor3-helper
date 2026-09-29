@@ -1,0 +1,25 @@
+import './state.js';
+import './theme.js';
+import './panel-controls.js';
+import './timestamps.js';
+import './daily-ops.js';
+import './alarms.js';
+import './dev-tcs.js';
+import './expeditions.js';
+import './modifiers.js';
+import './pinned-timers.js';
+import './markets.js';
+import './ui-toggles.js';
+import './inventory.js';
+import './loadout.js';
+import './mercenaries.js';
+import './archived-expeditions.js';
+import './auto-job-solver-ui.js';
+import './auto-valuable-seller-ui.js';
+import './helper-mode.js';
+import './version-info.js';
+import './refresh-all.js';
+import './auto-refresh.js';
+import './storage-listeners.js';
+
+console.log('[COR3 Helper] popup modules loaded');
