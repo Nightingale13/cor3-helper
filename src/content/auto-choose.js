@@ -1,16 +1,17 @@
 // Auto-Choose Decisions (content-side, works even when popup is closed)
+import { decisionScore } from '../shared/decision-policy.js';
 
 const contentAutoChosenDecisions = new Set();
 
 export function checkAutoChooseFromContent(decisions) {
     if (!decisions || decisions.length === 0) return;
-    chrome.storage.sync.get('decisionModifiers', (result) => {
-        const mods = result.decisionModifiers;
-        if (!mods || !mods.autoChoose) return;
-        const noWait = !!mods.noWaitAutoChoose;
-        const baseLootMod = mods.enabled !== false ? (mods.loot ?? 3) : 1;
-        const baseRiskMod = mods.enabled !== false ? (mods.risk ?? -2) : -1;
-        const getRidOfVeterans = !!mods.getRidOfVeterans;
+    chrome.storage.sync.get(['decisionModifiers', 'helperMode'], (result) => {
+        const mods = result.decisionModifiers || {};
+        if (result.helperMode || mods.autoChoose === false) return;
+        const noWait = mods.noWaitAutoChoose !== false;
+        const baseLootMod = mods.enabled !== false ? (mods.loot ?? 1) : 1;
+        const baseRiskMod = mods.enabled !== false ? (mods.risk ?? -5) : -1;
+        const getRidOfVeterans = mods.getRidOfVeterans !== false;
 
         // Load expedition data for veteran check
         chrome.storage.local.get('expeditionsData', (expResult) => {
@@ -38,7 +39,7 @@ export function checkAutoChooseFromContent(decisions) {
                 let bestOpt = null;
                 let bestScore = -Infinity;
                 for (const opt of d.decisionOptions) {
-                    const score = Math.round((opt.lootModifier * lootMod) + ((opt.riskModifier * riskMod) * (((d.riskScore + Math.abs(opt.riskModifier)) / 10) || 1)));
+                    const score = decisionScore(opt, d.riskScore, { enabled: true, loot: lootMod, risk: riskMod });
                     if (score > bestScore) { bestScore = score; bestOpt = opt; }
                 }
                 if (bestOpt) {

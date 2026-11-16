@@ -97,7 +97,7 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
         wrappedEls.add(expeditionsSection);
         const expChildren = Array.from(expeditionsSection.children);
         const splitPoints = [
-            { id: 'personalDroneSectionToggle', label: 'Personal Drone' },
+            { id: 'personalDroneSectionToggle', label: 'Drone Expeditions' },
             { id: 'decisionsSectionToggle', label: 'Decisions' },
             { id: 'inventorySectionToggle', label: 'Inventory' },
             { id: 'mercenariesSectionToggle', label: 'Mercenaries' },

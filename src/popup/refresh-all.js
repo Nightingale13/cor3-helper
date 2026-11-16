@@ -27,7 +27,10 @@ async function refreshExpeditionsOnly() {
     await chrome.storage.local.remove(['expeditionsData', 'expeditionDecisions']);
     try {
         const tab = await getCor3Tab();
-        if (tab) await chrome.tabs.sendMessage(tab.id, { action: "requestExpeditions" });
+        if (tab) {
+            await chrome.tabs.sendMessage(tab.id, { action: "requestExpeditions" });
+            await chrome.tabs.sendMessage(tab.id, { action: "requestDroneOptions" });
+        }
     } catch (e) {}
     await waitForStorageKey('expeditionsData', 8000);
     await loadExpeditions();

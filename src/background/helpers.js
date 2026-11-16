@@ -1,7 +1,7 @@
 export async function getCor3Tab() {
     try {
-        const [tab] = await chrome.tabs.query({ url: "*://*.cor3.gg/*" });
-        return tab || null;
+        const tabs = await chrome.tabs.query({ url: ['https://cor3.gg/*', 'https://os.cor3.gg/*'] });
+        return tabs.find(tab => tab.active) || tabs[0] || null;
     } catch (e) { return null; }
 }
 

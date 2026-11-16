@@ -22,7 +22,7 @@ const entryPoints = [
     { in: 'src/auto-job-solver/index.js', out: 'auto-job-solver' },
     { in: 'src/auto-valuable-seller/index.js', out: 'auto-valuable-seller' },
     { in: 'src/background/index.js', out: 'background' },
-    { in: 'src/content/index.js', out: 'content' },
+    { in: 'src/content/bootstrap.js', out: 'content' },
     { in: 'src/content-early/index.js', out: 'content-early' },
     { in: 'src/popup/index.js', out: 'popup' },
     { in: 'src/devtools-panel/index.js', out: 'devtools-panel' },
@@ -79,7 +79,7 @@ function copyStaticFiles() {
     for (const file of staticFiles) {
         const src = path.join(__dirname, file);
         const dest = path.join(DIST, path.basename(file));
-        if (!fs.existsSync(src)) continue;
+        if (!fs.existsSync(src)) throw new Error('Missing release asset: ' + file);
 
         // Auto update manifest extension version by using "package.json" data
         if (path.basename(file) === 'manifest.json') {

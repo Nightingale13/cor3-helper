@@ -15,17 +15,19 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - run: npm ci
 
       - run: npm run build
 
+      - run: npm run check:release
+
       - name: Zip dist
-        run: cd dist && zip -r ../cor3-helper-${{ github.ref_name }}.zip . && cd ..
+        run: cd dist && zip -r ../dist.zip .
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: cor3-helper-${{ github.ref_name }}.zip
+          files: dist.zip
           generate_release_notes: true

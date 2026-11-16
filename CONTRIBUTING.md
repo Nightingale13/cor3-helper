@@ -6,8 +6,9 @@ Thanks for your interest in contributing! This document outlines how to get star
 
 1. Fork the repository
 2. Clone your fork locally
-3. Load the extension in Chrome via `chrome://extensions` → "Load unpacked"
-4. Make your changes and test them against [cor3.gg](https://cor3.gg)
+3. Run `npm ci` and `npm run build` (Node.js 24 recommended)
+4. Load the built `dist/` folder in Chrome via `chrome://extensions` → "Load unpacked"
+5. Make your changes, rebuild, and test them against [cor3.gg](https://cor3.gg). Before a release, run `npm run check:release` after building.
 
 ## Project Structure
 
@@ -25,8 +26,9 @@ Thanks for your interest in contributing! This document outlines how to get star
 
 ## Development Guidelines
 
-- **No new dependencies** — This is a vanilla JS Chrome extension with no build step.
+- **No new dependencies** — This is a vanilla JS Chrome extension bundled with esbuild.
 - **Test manually** — Load the extension, open cor3.gg, and verify your changes work.
+- **Local checks** — If you have the private local test suite, run `npm test`. Tests and release notes are intentionally excluded from GitHub. Run `npm run check:release` after building to verify release metadata and packaged files.
 - **Keep comments minimal** — Don't add unnecessary comment lines.
 - **Match existing style** — Use `var` in MAIN world scripts, `const`/`let` in content/popup/background scripts.
 - **WebSocket protocol** — The game uses Socket.IO v5 with binary msgpack. All WS messages flow through the `decodeBinaryMsg` → `handleWsMessage` pipeline.
@@ -40,7 +42,7 @@ Thanks for your interest in contributing! This document outlines how to get star
 
 ## Reporting Bugs
 
-Use the [Bug Report](https://github.com/Femtoce11/cor3-helper/issues/new?template=bug_report.md) issue template. Include:
+Use the [Bug Report](https://github.com/Nightingale13/cor3-helper/issues/new?template=bug_report.md) issue template. Include:
 - Steps to reproduce
 - Expected vs actual behavior
 - Console logs (use the DevTools Log Viewer panel)

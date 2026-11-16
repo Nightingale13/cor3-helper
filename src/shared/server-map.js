@@ -532,20 +532,11 @@ export var FALLBACK_PATH_MAP = {
 };
 
 export function findMaintenanceBlocker(serverMaintenanceMap, marketKey) {
-    var pathKey = marketKey === 'dark' ? 'D4RK RM7MI' : marketKey === 'soyuz' ? 'SRM7-M' : marketKey === 'usol' ? 'URM7-M' : null;
-    if (!pathKey || !serverMaintenanceMap) return null;
-    var path = FALLBACK_PATH_MAP[pathKey];
-    if (!path) return null;
-    var now = Date.now();
-    for (var i = 0; i < path.length; i++) {
-        var info = serverMaintenanceMap[path[i].id];
-        if (info && info.isInMaintenance && info.maintenanceEndsAt) {
-            var remaining = new Date(info.maintenanceEndsAt).getTime() - now;
-            if (remaining > 0) {
-                return { blockerName: info.serverName || path[i].name, maintenanceEndsAt: info.maintenanceEndsAt };
-            }
-        }
-    }
+    // Without connections, only maintenance on the market itself is conclusive.
+    // Intermediate servers on a fallback route may have working alternatives.
+    const info = serverMaintenanceMap?.[MARKET_SERVER_IDS[marketKey]];
+    if (info?.isInMaintenance && (!info.maintenanceEndsAt || new Date(info.maintenanceEndsAt).getTime() > Date.now()))
+        return { blockerName: info.serverName, maintenanceEndsAt: info.maintenanceEndsAt || null };
     return null;
 }
 

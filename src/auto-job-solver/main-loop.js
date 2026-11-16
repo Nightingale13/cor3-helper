@@ -4,11 +4,12 @@ import { MARKET_SERVER_NAMES } from '../shared/server-constants.js';
 import { humanDelay } from '../shared/ws-utils.js';
 import { friendlyError } from '../shared/error-map.js';
 import { getServerTypeName } from '../shared/loadout-resolver.js';
-import { state, serverMap, sendCmd, delay, log, DARK_MARKET_SERVER_ID, SOYUZ_MARKET_SERVER_ID, USOL_MARKET_SERVER_ID, SERVER_PATH_MAP } from './state.js';
+import { state, serverMap, sendCmd, delay, log, SERVER_PATH_MAP } from './state.js';
 import { getServerPriority, getJobTypePriority, isJobBugged, updateTracker, saveCompletedResultsIncremental, signalDone, fetchMapData, checkPathMaintenance, invalidateLoadoutCache, ensureLoadoutForJob } from './helpers.js';
-import { stepSetEndpoint, stepLogin, stepCompleteJob } from './steps.js';
+import { stepSetEndpoint, stepLogin, stepCompleteJob, stepRefreshMarketJobs } from './steps.js';
 import { solveJob } from './solvers.js';
 import { waitForIceWallStuckClear, waitForMinigameWindow } from '../shared/hack-utils.js';
+import { isMinigameLocked } from '../shared/job-retry.js';
 
 export async function processQueue() {
     if (state.running) {
@@ -27,16 +28,10 @@ export async function processQueue() {
     try {
 
     // Wait if initial page load fetch is still in progress
-    var waitAttempts = 0;
-    while (window.__cor3InitialFetchInProgress && waitAttempts < 10 && !state.abortFlag) {
-        waitAttempts++;
-        log('Initial page load in progress — delaying auto-jobs start (attempt ' + waitAttempts + '/10, waiting 10s)...', 'warn');
-        await new Promise(function (r) { setTimeout(r, 10000); });
-    }
-    if (state.abortFlag) { signalDone(); return; }
-    if (window.__cor3InitialFetchInProgress) {
-        log('⚠️ Initial page load still in progress after 100s — proceeding anyway', 'warn');
-    }
+    if (window.__cor3InitialFetchInProgress) log('Waiting for initial game data before starting Auto Jobs.');
+    while (window.__cor3InitialFetchInProgress && !state.abortFlag)
+        await new Promise(function (r) { setTimeout(r, 500); });
+    if (state.abortFlag) return;
     state.tokenExpired = false;
     state._lastLoadoutServerType = null;
     state._lastEndpointServerId = null;
@@ -59,8 +54,9 @@ export async function processQueue() {
 
     log('Auto Job Solver started — processing ' + state.jobQueue.length + ' job(s)');
 
-    // Apply locked-job states from ICE Wall reload (if any)
-    var lockedJobs = state.solverSettings && state.solverSettings.lockedJobs;
+    // Restore lock deadlines for both normal retries and ICE Wall reloads.
+    var lockedJobs = state.jobQueue.filter(function (j) { return j.lockExpiresAt; })
+        .concat((state.solverSettings && state.solverSettings.lockedJobs) || []);
     if (lockedJobs && lockedJobs.length > 0) {
         var now = Date.now();
         var appliedCount = 0;
@@ -71,7 +67,10 @@ export async function processQueue() {
                 log('Locked job ' + locked.jobId + ' no longer in queue — ignoring', 'warn');
                 continue;
             }
-            if (locked.lockExpiresAt && new Date(locked.lockExpiresAt).getTime() > now) {
+            if (matchingJob.canComplete) continue;
+            if (isMinigameLocked(matchingJob, now) &&
+                new Date(matchingJob.lockExpiresAt).getTime() > new Date(locked.lockExpiresAt).getTime()) locked = matchingJob;
+            if (isMinigameLocked(locked, now)) {
                 var lockMins = Math.ceil((new Date(locked.lockExpiresAt).getTime() - now) / 60000);
                 matchingJob.status = 'skipped';
                 matchingJob.error = 'Minigame locked (~' + lockMins + 'm remaining)';
@@ -82,7 +81,10 @@ export async function processQueue() {
                 log('Lock expired for job: ' + (matchingJob.name || locked.jobId) + ' — keeping as pending');
             }
         }
-        if (appliedCount > 0) log(appliedCount + ' job(s) marked as skipped from previous ICE Wall lockout');
+        if (appliedCount > 0) {
+            log(appliedCount + ' job(s) deferred until their minigame locks expire');
+            saveCompletedResultsIncremental();
+        }
     }
 
     updateTracker();
@@ -132,13 +134,6 @@ export async function processQueue() {
             cj.status = 'running';
             updateTracker();
             try {
-                if (cj.marketKey === 'dark') {
-                    await stepSetEndpoint(DARK_MARKET_SERVER_ID);
-                } else if (cj.marketKey === 'soyuz') {
-                    await stepSetEndpoint(SOYUZ_MARKET_SERVER_ID);
-                } else if (cj.marketKey === 'usol') {
-                    await stepSetEndpoint(USOL_MARKET_SERVER_ID);
-                }
                 var cReward = await stepCompleteJob(cj);
                 if (cReward) {
                     cj.status = 'done';
@@ -157,8 +152,10 @@ export async function processQueue() {
             updateTracker();
             saveCompletedResultsIncremental();
             await delay(humanDelay());
-            sendCmd('get.jobs', { marketId: cj.marketId });
-            await delay(1000);
+            if (cj.status === 'done') {
+                try { await stepRefreshMarketJobs(cj); }
+                catch (error) { log('Market refresh skipped: ' + error.message, 'warn'); }
+            }
         }
     }
 
@@ -220,13 +217,6 @@ export async function processQueue() {
                 log('Target access confirmed before taking job', 'success');
             }
 
-            if (job.marketKey === 'dark') {
-                await stepSetEndpoint(DARK_MARKET_SERVER_ID);
-            } else if (job.marketKey === 'soyuz') {
-                await stepSetEndpoint(SOYUZ_MARKET_SERVER_ID);
-            } else if (job.marketKey === 'usol') {
-                await stepSetEndpoint(USOL_MARKET_SERVER_ID);
-            }
             log('Processing job ' + (i + 1) + '/' + state.jobQueue.length + ': ' + (job.name || job.type));
             var reward = await solveJob(job);
             if (reward) {
@@ -279,6 +269,10 @@ export async function processQueue() {
                 log('⚠️ Job skipped (token expired): ' + job.name + ' — ' + errText, 'warn');
             } else if (e.message && e.message.includes('minigame-locked')) {
                 job.lockExpiresAt = e.lockExpiresAt || null;
+                job.status = 'skipped';
+                job.error = errText;
+                updateTracker();
+                saveCompletedResultsIncremental();
                 log('🔒 Minigame locked — waiting up to 5s for minigame window to appear...', 'warn');
                 var minigameType = await waitForMinigameWindow(5000);
                 if (minigameType === 'icewall') {
@@ -376,8 +370,10 @@ export async function processQueue() {
         if (state.abortFlag) break;
         try {
             await delay(humanDelay());
-            sendCmd('get.jobs', { marketId: job.marketId });
-            await delay(1000);
+            if (job.status === 'done') {
+                try { await stepRefreshMarketJobs(job); }
+                catch (error) { log('Market refresh skipped: ' + error.message, 'warn'); }
+            }
             if (i < state.jobQueue.length - 1 && !state.abortFlag) {
                 var interJobDelay = 2000 + Math.floor(Math.random() * 1500);
                 log('Waiting ' + Math.round(interJobDelay / 1000) + 's before next job...');

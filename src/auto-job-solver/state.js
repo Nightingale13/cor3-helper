@@ -34,7 +34,7 @@ export var USOL_MARKET_SERVER_ID = MARKET_SERVER_IDS.usol;
 export var serverMap = new ServerMap();
 
 // ---- Wired utilities (bound to solver abortFlag) ----
-export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD');
+export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD', 'auto-jobs');
 export var delay = createDelay(function () { return state.abortFlag; });
 export var waitForEvent = createWaitForEvent(function () { return state.abortFlag; });
 export var log = createLogger('[COR3 Auto-Jobs]', 'COR3_AUTOJOB_LOG');

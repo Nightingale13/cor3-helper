@@ -1,19 +1,23 @@
 // WebSocket command wrappers: stash, specialists, loadout, auto-job, valuable seller, updater
 import { wsSend, enterRooms } from './ws-send.js';
+import { requestOptions } from './request-control.js';
 
-// Send stash request: leave if in room, delay, then re-join
-window.__cor3RequestStash = function () {
+// Refresh state without leaving a room the player may be using.
+window.__cor3RequestStash = function (requestId) {
+    const options = requestOptions(requestId);
     console.log('[COR3 Helper] Requesting stash data');
-    enterRooms(['stash']);
+    enterRooms(['stash']).then(() => {
+        wsSend('42["event",{"event":{"name":"stash","action":"get.state"},"data":{}}]', options);
+    });
     return true;
 };
 
 // Sell an item from stash
-window.__cor3SellItem = function (itemId, quantity, skipStashRefresh) {
+window.__cor3SellItem = function (itemId, quantity, skipStashRefresh, requestId) {
     quantity = quantity || 1;
     console.log('[COR3 Helper] Selling item:', itemId, 'qty:', quantity);
     var msg = '42["event",{"event":{"name":"stash","action":"sell.item"},"data":{"itemId":"' + itemId + '","quantity":' + quantity + '}}]';
-    wsSend(msg);
+    wsSend(msg, requestOptions(requestId));
     if (!skipStashRefresh) {
         setTimeout(function () {
             window.__cor3RequestStash();
@@ -37,26 +41,31 @@ window.__cor3PurchaseSpecialist = function (specialistType, kind, level, priceId
 };
 
 // --- Loadout WS send functions ---
-window.__cor3RequestLoadout = function () {
+function manualLoadout(action) {
+    return { interactive: true, onReject: error => window.postMessage({
+        type: 'COR3_WS_LOADOUT_ERROR', action, error
+    }, '*') };
+}
+window.__cor3RequestLoadout = function (interactive = false) {
     console.log('[COR3 Helper] Requesting loadout data');
     var msg = '42["event",{"event":{"name":"loadout","action":"get.options"}}]';
-    wsSend(msg);
+    wsSend(msg, interactive ? manualLoadout('get.options') : {});
     return true;
 };
 window.__cor3EquipHardware = function (moduleConfigId) {
     console.log('[COR3 Helper] Equipping hardware:', moduleConfigId);
     var msg = '42["event",{"event":{"name":"loadout","action":"equip.hardware"},"data":{"moduleConfigId":"' + moduleConfigId + '"}}]';
-    wsSend(msg);
+    wsSend(msg, manualLoadout('equip.hardware'));
 };
 window.__cor3EquipSoftware = function (moduleConfigId) {
     console.log('[COR3 Helper] Equipping software:', moduleConfigId);
     var msg = '42["event",{"event":{"name":"loadout","action":"equip.software"},"data":{"moduleConfigId":"' + moduleConfigId + '"}}]';
-    wsSend(msg);
+    wsSend(msg, manualLoadout('equip.software'));
 };
 window.__cor3UnequipSoftware = function (moduleConfigId) {
     console.log('[COR3 Helper] Unequipping software:', moduleConfigId);
     var msg = '42["event",{"event":{"name":"loadout","action":"unequip.software"},"data":{"moduleConfigId":"' + moduleConfigId + '"}}]';
-    wsSend(msg);
+    wsSend(msg, manualLoadout('unequip.software'));
 };
 
 // --- Auto Job Solver WS send functions ---
@@ -73,8 +82,6 @@ window.__cor3AutoJobDismiss = function (marketId, jobId) {
     wsSend(msg);
 };
 window.__cor3AutoJobGetMarketOptions = function (marketId) {
-    // Update current market fetch tracker so the response handler routes jobs to the correct market cache
-    window.__cor3CurrentMarketFetch = marketId;
     var msg = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + marketId + '"}}]';
     wsSend(msg);
 };

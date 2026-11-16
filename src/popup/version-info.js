@@ -1,90 +1,61 @@
 import { _safeSetHtml } from './dom-helpers.js';
 import { getCor3Tab } from './utils.js';
 
+const RELEASES_URL = 'https://github.com/Nightingale13/cor3-helper/releases';
+const LATEST_RELEASE_API = 'https://api.github.com/repos/Nightingale13/cor3-helper/releases/latest';
 const checkUpdateBtn = document.getElementById('checkUpdateBtn');
 const updateResult = document.getElementById('updateResult');
 
-function compareVersions(v1, v2) {
-    if (!v1 || !v2) return 0;
-
-    const parse = (v) => {
-        const stripped = String(v).replace(/^v/, '');
-        const match = stripped.match(/^([\d.]+)(.*)$/);
-        if (!match) return { parts: [0], suffix: stripped };
-        return {
-            parts: match[1].split('.').map(n => parseInt(n) || 0),
-            suffix: match[2] || ''
-        };
-    };
-
-    const a = parse(v1);
-    const b = parse(v2);
-
-    const maxLength = Math.max(a.parts.length, b.parts.length);
-    for (let i = 0; i < maxLength; i++) {
-        const num1 = a.parts[i] || 0;
-        const num2 = b.parts[i] || 0;
-        if (num1 < num2) return -1;
-        if (num1 > num2) return 1;
+function compareVersions(local, remote) {
+    const a = local.split('.').map(Number), b = remote.split('.').map(Number);
+    for (let i = 0; i < 3; i++) {
+        if (a[i] < b[i]) return -1;
+        if (a[i] > b[i]) return 1;
     }
-
-    const hasSuffix1 = a.suffix.length > 0;
-    const hasSuffix2 = b.suffix.length > 0;
-    if (!hasSuffix1 && hasSuffix2) return -1;
-    if (hasSuffix1 && !hasSuffix2) return 1;
-    if (hasSuffix1 && hasSuffix2) return a.suffix.localeCompare(b.suffix);
-
     return 0;
 }
 
 checkUpdateBtn.addEventListener('click', async () => {
-    updateResult.textContent = 'Checking...';
+    if (checkUpdateBtn.disabled) return;
+    checkUpdateBtn.disabled = true;
+    updateResult.textContent = 'Checking GitHub releases…';
     updateResult.style.color = 'var(--text-dim)';
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-        const localManifest = chrome.runtime.getManifest();
-        const localExtVersion = localManifest.version;
-
-        const versionsResp = await fetch('https://raw.githubusercontent.com/Femtoce11/cor3-helper/main/versions.json', { cache: 'no-store' });
-        if (!versionsResp.ok) throw new Error('Failed to fetch remote versions');
-        const remote = await versionsResp.json();
-
-        let remoteExtVersion = null;
-        try {
-            const pkgResp = await fetch('https://raw.githubusercontent.com/Femtoce11/cor3-helper/main/package.json', { cache: 'no-store' });
-            if (pkgResp.ok) {
-                const remotePkg = await pkgResp.json();
-                remoteExtVersion = remotePkg.version || null;
-            }
-        } catch (e) { /* silent */ }
-
-        const { webVersion, systemVersion } = await chrome.storage.local.get(['webVersion', 'systemVersion']);
-
-        let messages = [];
-        let extBehind = false;
-
-        if (remoteExtVersion && compareVersions(localExtVersion, remoteExtVersion) < 0) {
-            messages.push(`Extension: <b>v${localExtVersion}</b> → <b>v${remoteExtVersion}</b>`);
-            extBehind = true;
+        const response = await fetch(LATEST_RELEASE_API, { cache: 'no-store', signal: controller.signal,
+            headers: { Accept: 'application/vnd.github+json' } });
+        if (response.status === 404) {
+            _safeSetHtml(updateResult, `No public stable release is available for this fork. <a href="${RELEASES_URL}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">View releases</a>`);
+            return;
         }
-
-        if (messages.length > 0) {
-            let html = `Updates detected:<br>${messages.join('<br>')}`;
-            if (extBehind) {
-                html += `<br><a href="https://github.com/Femtoce11/cor3-helper/releases" target="_blank" style="color:var(--accent-cyan);">Download from GitHub</a><br><span style="font-size:9px;color:var(--text-muted);">Download ZIP, extract, and reload on chrome://extensions</span>`;
-            }
-            _safeSetHtml(updateResult, html);
+        if (response.status === 403 || response.status === 429)
+            throw new Error('GitHub limited the update check. Try again later.');
+        if (!response.ok) throw new Error('Could not check GitHub releases. Try again later.');
+        const release = await response.json();
+        const match = typeof release.tag_name === 'string' && release.tag_name.match(/^v?(\d+\.\d+\.\d+)$/);
+        if (!match || release.draft || release.prerelease)
+            throw new Error('The latest release does not have a supported stable version tag.');
+        const remoteVersion = match[1];
+        const localVersion = chrome.runtime.getManifest().version;
+        const comparison = compareVersions(localVersion, remoteVersion);
+        if (comparison < 0) {
+            const releaseUrl = `${RELEASES_URL}/tag/${encodeURIComponent(release.tag_name)}`;
+            _safeSetHtml(updateResult, `Extension update available: <b>v${localVersion}</b> → <b>v${remoteVersion}</b><br><a href="${releaseUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Download release from GitHub</a><br><span style="font-size:9px;color:var(--text-muted);">Download dist.zip, extract, and reload the extension on chrome://extensions.</span>`);
             updateResult.style.color = 'var(--accent-orange)';
         } else {
-            const localWeb = webVersion || null;
-            const localSys = systemVersion || null;
-            updateResult.textContent = `You're up to date!`;
-            updateResult.style.color = 'var(--accent-green)';
+            updateResult.textContent = comparison === 0 ? `You're up to date (v${localVersion}).`
+                : `Installed v${localVersion}; latest published release is v${remoteVersion}.`;
+            updateResult.style.color = comparison === 0 ? 'var(--accent-green)' : 'var(--text-dim)';
         }
-    } catch (e) {
-        console.log('[COR3 Helper] Check for updates error:', e);
-        cor3LogError('popup.js', e, { action: 'checkForUpdates' });
-        updateResult.textContent = 'Could not check for updates. Check your connection.';
+    } catch (error) {
+        console.log('[COR3 Helper] Check for updates error:', error);
+        cor3LogError('popup.js', error, { action: 'checkForUpdates' });
+        updateResult.textContent = error.name === 'AbortError' ? 'GitHub update check timed out. Try again.' : error.message;
         updateResult.style.color = 'var(--accent-red)';
+    } finally {
+        clearTimeout(timeout);
+        checkUpdateBtn.disabled = false;
     }
 });
 
@@ -125,7 +96,7 @@ async function displayVersionInfo(retryCount) {
     }
 
     let parts = [`Extension: v${extVersion}`];
-    if (finalWebVersion) parts.push(`Web: ${finalWebVersion}`);
+    if (finalWebVersion) parts.push(`Game web: ${finalWebVersion}`);
     if (finalSystemVersion) parts.push(`System: ${finalSystemVersion}`);
     if (finalPatchVersion) parts.push(`Patch: ${finalPatchVersion}`);
     versionSection.textContent = parts.join(' · ');
@@ -137,57 +108,7 @@ async function displayVersionInfo(retryCount) {
 }
 displayVersionInfo(0);
 
-async function autoCheckWebsiteUpdated() {
-    const webVersionNotice = document.getElementById('webVersionNotice');
-    const webVersionData = document.getElementById('webVersionData');
-    const systemVersionNotice = document.getElementById('systemVersionNotice');
-    const systemVersionData = document.getElementById('systemVersionData');
-    const patchVersionNotice = document.getElementById('patchVersionNotice');
-    const patchVersionData = document.getElementById('patchVersionData');
-    if (!webVersionNotice || !webVersionData || !systemVersionNotice || !systemVersionData) return;
-    try {
-        const resp = await fetch('https://raw.githubusercontent.com/Femtoce11/cor3-helper/main/versions.json', { cache: 'no-store' });
-        if (!resp.ok) return;
-        const remote = await resp.json();
-        const { webVersion, systemVersion, patchVersion } = await chrome.storage.local.get(['webVersion', 'systemVersion', 'patchVersion']);
-
-        if (webVersion && remote.web) {
-            const comparison = compareVersions(webVersion, remote.web);
-            if (comparison > 0) {
-                webVersionNotice.textContent = '⚠️ Website is recently updated';
-                webVersionNotice.style.display = 'block';
-                webVersionData.textContent = 'Detected: ' + webVersion + ' · Old: ' + remote.web;
-                webVersionData.style.display = 'block';
-            }
-        }
-
-        if (systemVersion && remote.system) {
-            const comparison = compareVersions(systemVersion, remote.system);
-            if (comparison < 0) {
-                systemVersionNotice.textContent = '⚠️ You are lagging behind in progress!';
-                systemVersionNotice.style.display = 'block';
-                webVersionData.textContent = 'Aim for ' + remote.system + ' system version!';
-                webVersionData.style.display = 'block';
-            }
-        }
-
-        if (patchVersion && remote.patch && patchVersionNotice && patchVersionData) {
-            const comparison = compareVersions(patchVersion, remote.patch);
-            if (comparison > 0) {
-                patchVersionNotice.textContent = '⚠️ Patch version is changed. Check patch notes!';
-                patchVersionNotice.style.display = 'block';
-                patchVersionData.textContent = 'Detected: ' + patchVersion + ' · Old: ' + remote.patch;
-                patchVersionData.style.display = 'block';
-            }
-        }
-    } catch (e) { /* silent */ }
-}
-autoCheckWebsiteUpdated();
-
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.webVersion || changes.systemVersion || changes.patchVersion) {
-        displayVersionInfo();
-        autoCheckWebsiteUpdated();
-    }
+    if (changes.webVersion || changes.systemVersion || changes.patchVersion) displayVersionInfo();
 });

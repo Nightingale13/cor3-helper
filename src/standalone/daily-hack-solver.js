@@ -9,10 +9,42 @@
         console.log('[COR3 Daily Hack] Solver already active.');
         return;
     }
+    // A stop can arrive while this script is still loading.
+    if (window.__dailyHackAbort) {
+        window.__dailyHackAbort = false;
+        window.postMessage({ type: 'COR3_DAILY_HACK_FINISHED', success: false, aborted: true }, '*');
+        return;
+    }
     window.__dailyHackActive = true;
     window.__dailyHackAbort = false;
 
-    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const guard = window.__cor3InteractionGuard;
+    const dailyIds = ['019a0c41-b17f-7abc-1234-567890abcde1', '019a0c41-b17f-7abc-1234-567890abcde2',
+        '019aea65-b0c2-70e9-bbbc-8caed416854c', '019aea65-b0c2-7695-8bed-7b66cd57545c'];
+    // Without ownership tracking it is safer to leave the user's desktop alone.
+    if (!guard) {
+        window.__dailyHackActive = false;
+        window.postMessage({ type: 'COR3_DAILY_HACK_FINISHED', success: false }, '*');
+        return;
+    }
+    const windows = guard.createWindowOwner(dailyIds);
+    const nativeSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    function isDailyElement(el) {
+        const app = el.closest('[data-sentry-component="Application"]');
+        return app && dailyIds.includes((app.getAttribute('data-component-name') || '').replace(/^Application-/, ''));
+    }
+    async function waitForUser() {
+        while (guard.isPaused(dailyIds)) {
+            if (window.__dailyHackAbort) throw new Error('Aborted');
+            await nativeSleep(250);
+        }
+        if (window.__dailyHackAbort) throw new Error('Aborted');
+    }
+    async function sleep(ms) {
+        await nativeSleep(ms);
+        windows.endOpen();
+        await waitForUser();
+    }
     const hlog = (msg, level) => {
         level = level || 'info';
         console.log('[COR3 Daily Hack] ' + msg);
@@ -36,13 +68,20 @@
     }
 
     // --- Click helper with React-compatible event dispatch ---
-    function click(el) {
+    async function click(el) {
         if (!el) return;
+        await waitForUser();
+        if (!el.isConnected) return;
+        const app = el.closest('[data-sentry-component="Application"]');
+        if (app && !isDailyElement(el)) return;
+        windows.beginOpen();
         el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     }
 
     // --- Set React-controlled input value ---
-    function setInputValue(input, value) {
+    async function setInputValue(input, value) {
+        await waitForUser();
+        if (!input.isConnected || !isDailyElement(input)) return;
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
         nativeInputValueSetter.call(input, value);
         input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -114,7 +153,9 @@
         return [...new Set(issues)];
     }
 
-    function clickCheckbox(entryEl) {
+    async function clickCheckbox(entryEl) {
+        await waitForUser();
+        if (!entryEl.isConnected || !isDailyElement(entryEl)) return false;
         const input = entryEl.querySelector('input[type="checkbox"]') ||
                        entryEl.querySelector('.checkbox input') ||
                        entryEl.querySelector('[role="checkbox"]') ||
@@ -138,25 +179,18 @@
             .find(b => (b.textContent || '').trim() === label) || null;
     }
 
-    // --- Close app windows (decode screen, daily ops) ---
+    // Close only windows opened by this run that the user has not taken over.
     async function closeAppWindows(count) {
-        count = count || 2;
-        for (let i = 0; i < count; i++) {
-            await sleep(300);
-            const closeBtn = document.querySelector('[data-component-name="close-app-btn"]');
-            if (closeBtn) {
-                click(closeBtn);
-                hlog('Closed window ' + (i + 1));
-            } else {
-                break;
-            }
-        }
+        await windows.close(count || 2);
     }
 
     // =============================================
     // STEP 1: Open Daily Ops tab
     // =============================================
     async function openDailyOpsTab() {
+        await waitForUser();
+        if (document.querySelector('[data-component-name="Application-' + dailyIds[0] + '"]') ||
+            document.querySelector('[data-component-name="Application-' + dailyIds[1] + '"]')) return true;
         hlog('Opening Daily Ops tab...');
         // Click the tab bar item that opens daily ops page
         let tabItem = document.querySelector('[data-component-name="TabBarItem-019a0c41-b17f-7abc-1234-567890abcde2"]');
@@ -167,7 +201,7 @@
                 return false;
             }
         }
-        click(tabItem);
+        await click(tabItem);
         await sleep(800);
         return true;
     }
@@ -186,7 +220,7 @@
             hlog('Could not find Daily Ops section button (.game-center-grid button:nth-child(2))', 'error');
             return false;
         }
-        click(dailyOpsBtn);
+        await click(dailyOpsBtn);
         hlog('Clicked Daily Ops section');
         await sleep(1000);
         return true;
@@ -202,7 +236,7 @@
             hlog('Could not find Start Task button (.start-task-button)', 'error');
             return false;
         }
-        click(startBtn);
+        await click(startBtn);
         hlog('Clicked Start Task');
         await sleep(1000);
         return true;
@@ -220,7 +254,7 @@
             hlog('Could not find Get Signal button (.go190644802)', 'error');
             return false;
         }
-        click(getSignalBtn);
+        await click(getSignalBtn);
         hlog('Clicked Get Signal');
         await sleep(1500);
 
@@ -289,7 +323,7 @@
             hlog('Could not find Select Encoding button (.next-button)', 'error');
             return false;
         }
-        click(selectEncodingBtn);
+        await click(selectEncodingBtn);
         hlog('Clicked Select Encoding');
         await sleep(800);
 
@@ -308,7 +342,7 @@
             hlog(`Could not find encoding option "${targetLabel}"`, 'error');
             return false;
         }
-        click(chosen);
+        await click(chosen);
         hlog(`Selected encoding: ${targetLabel}`);
         await sleep(500);
 
@@ -318,7 +352,7 @@
             hlog('Could not find Decode Signal button (.next-button)', 'error');
             return false;
         }
-        click(decodeBtn);
+        await click(decodeBtn);
         hlog('Clicked Decode Signal');
         await sleep(800);
 
@@ -328,7 +362,7 @@
             hlog('Could not find code input (.code-input)', 'error');
             return false;
         }
-        setInputValue(codeInput, value);
+        await setInputValue(codeInput, value);
         hlog(`Entered code: ${value}`);
         await sleep(400);
 
@@ -338,7 +372,7 @@
             hlog('Could not find Confirm Code button (.submit-button)', 'error');
             return false;
         }
-        click(confirmBtn);
+        await click(confirmBtn);
         hlog('Clicked CONFIRM CODE');
         await sleep(1500);
 
@@ -371,7 +405,7 @@
             hlog('Could not find Get Logs button (.go190644802)', 'error');
             return false;
         }
-        click(getLogsBtn);
+        await click(getLogsBtn);
         hlog('Clicked Get Logs');
         await sleep(4000);
         // Step B: Wait for pulse timeline and decode
@@ -406,7 +440,7 @@
         if (selected.length < 2) hlog(`Only found ${selected.length} invalid log(s)`);
 
         for (const entry of selected) {
-            clickCheckbox(entry.el);
+            await clickCheckbox(entry.el);
         }
 
         hlog(`Selected ${selected.length} wrong log(s)`);
@@ -421,7 +455,7 @@
             hlog('Could not find .confirm-button', 'error');
             return false;
         }
-        click(confirmSelectionBtn);
+        await click(confirmSelectionBtn);
         await sleep(1000);
 
         // Handle analysis/fix phase
@@ -455,13 +489,13 @@
 
             const fixBtn = block.querySelector('.fix-error-button');
             if (fixBtn) {
-                click(fixBtn);
+                await click(fixBtn);
                 await sleep(50);
                 for (const iss of issues) {
                     const label = ERROR_LABELS[iss] || iss;
                     const errBtn = findErrorTypeButton(block, label);
                     if (errBtn) {
-                        click(errBtn);
+                        await click(errBtn);
                         await sleep(25);
                     } else {
                         console.log('[COR3 Daily Hack] Could not find error-type-button for:', label);
@@ -477,7 +511,7 @@
             hlog('Could not find .confirm-button', 'error');
             return false;
         }
-        click(confirmFixesBtn);
+        await click(confirmFixesBtn);
 
         await sleep(1000);
         // Click confirm button
@@ -486,7 +520,7 @@
             hlog('Could not find .confirm-button', 'error');
             return false;
         }
-        click(scanBtn);
+        await click(scanBtn);
 
         // Wait for result
         await sleep(1500);
@@ -597,11 +631,9 @@
 
             if (result.success) {
                 hlog('✅ Daily hack completed successfully!', 'success');
-                // Auto-disable toggle after success
-                window.postMessage({ type: 'COR3_DAILY_HACK_DISABLE_TOGGLE' }, '*');
                 // Refresh daily ops data so UI reflects completion
                 window.postMessage({ type: 'COR3_FETCH_DAILY_OPS' }, '*');
-                cleanup();
+                cleanup(true);
                 return;
             }
 
@@ -610,16 +642,22 @@
             }
         }
 
+        if (window.__dailyHackAbort) { cleanup(); return; }
         // All attempts failed
-        hlog(`Daily hack failed after ${MAX_ATTEMPTS} attempts — disabling toggle`, 'error');
-        window.postMessage({ type: 'COR3_DAILY_HACK_DISABLE_TOGGLE' }, '*');
+        hlog(`Daily hack failed after ${MAX_ATTEMPTS} attempts — retrying later`, 'error');
         cleanup();
     }
 
-    function cleanup() {
+    function cleanup(success = false) {
+        const aborted = window.__dailyHackAbort;
+        windows.dispose();
         window.__dailyHackActive = false;
         window.__dailyHackAbort = false;
+        window.postMessage({ type: 'COR3_DAILY_HACK_FINISHED', success, aborted }, '*');
     }
 
-    run();
+    run().catch(error => {
+        if (!window.__dailyHackAbort) hlog('Daily hack paused: ' + error.message, 'warn');
+        cleanup();
+    });
 })();

@@ -1,17 +1,39 @@
 // content.js helpers — context check, automation queue
+import { automationPaused } from '../shared/ws-utils.js';
+
+window.addEventListener('message', event => {
+    if (event.source !== window || event.data?.type !== 'COR3_MANUAL_ACTIVITY') return;
+    _broadcastQueueStatus();
+    if (!event.data.paused) _automationProcessNext();
+});
 
 export function isContextValid() {
-    try { return !!chrome.runtime.id; } catch (e) { return false; }
+    try { return !!chrome.runtime.id && !!chrome.runtime.getManifest(); } catch (e) { return false; }
 }
 
 // --- Automation Queue: prevents parallel endpoint-changing processes ---
 let _automationQueue = [];
 let _automationActive = null; // { type, startedAt }
+let idleTimer = null;
+
+function startAutomation(next) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+    const active = { type: next.type, startedAt: Date.now() };
+    _automationActive = active;
+    _broadcastQueueStatus();
+    function failed(error) {
+        console.log('[COR3 Helper] Automation task stopped:', next.type, error.message);
+        if (_automationActive === active) _automationFinish(next.type);
+    }
+    try { Promise.resolve(next.run()).catch(failed); } catch (error) { failed(error); }
+}
 
 export function _automationQueueStatus() {
     return {
         active: _automationActive ? _automationActive.type : null,
-        queued: _automationQueue.map(q => q.type)
+        queued: _automationQueue.map(q => q.type),
+        pausedForUser: automationPaused()
     };
 }
 
@@ -35,10 +57,14 @@ export function _automationFinish(type) {
 }
 
 export function _automationProcessNext() {
+    if (!isContextValid()) return;
     if (_automationActive) return;
     if (_automationQueue.length === 0) {
         _broadcastQueueStatus();
-        setTimeout(() => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+            idleTimer = null;
+            if (!isContextValid()) return;
             if (_automationActive || _automationQueue.length > 0) return;
             chrome.storage.local.get('expeditionsData', (result) => {
                 if (result.expeditionsData) {
@@ -49,25 +75,23 @@ export function _automationProcessNext() {
         }, 3000);
         return;
     }
-    var next = _automationQueue.shift();
-    _automationActive = { type: next.type, startedAt: Date.now() };
+    const index = automationPaused() ? _automationQueue.findIndex(q => q.type === 'auto-drone') : 0;
+    if (index < 0) { _broadcastQueueStatus(); return; }
+    var next = _automationQueue.splice(index, 1)[0];
     console.log('[COR3 Helper] Automation starting:', next.type);
-    _broadcastQueueStatus();
-    next.run();
+    startAutomation(next);
 }
 
 export function _automationEnqueue(type, runFn) {
-    if (_automationActive && _automationActive.type === type) return 'already-running';
+    if (_automationActive && _automationActive.type === type && !_automationActive.stopping) return 'already-running';
     if (_automationQueue.some(q => q.type === type)) return 'already-queued';
-    if (!_automationActive) {
-        _automationActive = { type: type, startedAt: Date.now() };
+    if (!_automationActive && (!automationPaused() || type === 'auto-drone')) {
         console.log('[COR3 Helper] Automation starting:', type);
-        _broadcastQueueStatus();
-        runFn();
+        startAutomation({ type, run: runFn });
         return 'started';
     }
     _automationQueue.push({ type: type, run: runFn });
-    console.log('[COR3 Helper] Automation queued:', type, '(waiting for', _automationActive.type, ')');
+    console.log('[COR3 Helper] Automation queued:', type, '(waiting for', _automationActive?.type || 'manual browsing', ')');
     _broadcastQueueStatus();
     return 'queued';
 }

@@ -1,22 +1,15 @@
 import { getCor3Tab } from './helpers.js';
+import { decisionScore } from '../shared/decision-policy.js';
 
 const autoChosenDecisions = new Set();
 
-function calcOptionScoreBg(opt, expeditionRiskScore, lootMod, riskMod) {
-    return Math.round((opt.lootModifier * lootMod) + ((opt.riskModifier * riskMod) * (((expeditionRiskScore + Math.abs(opt.riskModifier)) / 10) || 1)));
-}
-
 export async function checkAutoChooseBackground() {
     try {
-        const settings = await chrome.storage.sync.get('decisionModifiers');
+        const settings = await chrome.storage.sync.get(['decisionModifiers', 'helperMode']);
         const mods = settings.decisionModifiers || {};
-        if (!mods.autoChoose) return;
+        if (settings.helperMode || mods.autoChoose === false) return;
 
-        const modifiersEnabled = mods.enabled !== false;
-        const lootMod = modifiersEnabled ? (mods.loot ?? 3) : 1;
-        const riskMod = modifiersEnabled ? (mods.risk ?? -2) : -1;
-
-        const { expeditionDecisions } = await chrome.storage.local.get('expeditionDecisions');
+        const { expeditionDecisions, expeditionsData } = await chrome.storage.local.get(['expeditionDecisions', 'expeditionsData']);
         const decisions = expeditionDecisions || [];
         if (decisions.length === 0) return;
 
@@ -26,12 +19,14 @@ export async function checkAutoChooseBackground() {
             const dl = new Date(d.decisionDeadline);
             const remaining = dl - Date.now();
             if (remaining <= 0) continue;
-            if (remaining > 60000) continue;
+            if (mods.noWaitAutoChoose === false && remaining > 60000) continue;
 
             let bestOpt = null;
             let bestScore = -Infinity;
+            const veteranOverride = mods.getRidOfVeterans !== false && (expeditionsData || []).some(exp =>
+                exp.id === d.expeditionId && String(exp.mercenary?.rank || '').toUpperCase() === 'VETERAN');
             for (const opt of d.decisionOptions) {
-                const score = calcOptionScoreBg(opt, d.riskScore, lootMod, riskMod);
+                const score = decisionScore(opt, d.riskScore, mods, veteranOverride);
                 if (score > bestScore) {
                     bestScore = score;
                     bestOpt = opt;

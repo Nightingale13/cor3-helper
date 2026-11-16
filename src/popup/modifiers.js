@@ -49,8 +49,9 @@ editModifiersBtn.addEventListener('click', () => {
 });
 
 saveModifiersBtn.addEventListener('click', () => {
-    savedLootMod = parseInt(lootModInput.value) || 3;
-    savedRiskMod = parseInt(riskModInput.value) || -2;
+    const loot = parseInt(lootModInput.value, 10), risk = parseInt(riskModInput.value, 10);
+    savedLootMod = Number.isFinite(loot) ? loot : 1;
+    savedRiskMod = Number.isFinite(risk) ? risk : -5;
     modifierEditRow.style.display = 'none';
     modifierDisplay.style.display = '';
     syncModifiers();
@@ -95,18 +96,20 @@ if (getRidOfVeteransToggle) {
     });
 }
 
-chrome.storage.sync.get('decisionModifiers', (data) => {
-    if (data.decisionModifiers) {
-        savedLootMod = data.decisionModifiers.loot ?? 1;
-        savedRiskMod = data.decisionModifiers.risk ?? -5;
-        modifiersEnabled = data.decisionModifiers.enabled !== false;
-        autoChooseCheckbox.checked = !!data.decisionModifiers.autoChoose;
-        if (noWaitAutoChooseCheckbox) noWaitAutoChooseCheckbox.checked = !!data.decisionModifiers.noWaitAutoChoose;
-        if (getRidOfVeteransToggle) getRidOfVeteransToggle.checked = !!data.decisionModifiers.getRidOfVeterans;
-        if (noWaitRow) noWaitRow.style.display = autoChooseCheckbox.checked ? '' : 'none';
-    }
+function applyDecisionSettings(settings = {}) {
+    savedLootMod = settings.loot ?? 1;
+    savedRiskMod = settings.risk ?? -5;
+    modifiersEnabled = settings.enabled !== false;
+    autoChooseCheckbox.checked = settings.autoChoose !== false;
+    if (noWaitAutoChooseCheckbox) noWaitAutoChooseCheckbox.checked = settings.noWaitAutoChoose !== false;
+    if (getRidOfVeteransToggle) getRidOfVeteransToggle.checked = settings.getRidOfVeterans !== false;
+    if (noWaitRow) noWaitRow.style.display = autoChooseCheckbox.checked ? '' : 'none';
     modifiersEnabledToggle.checked = modifiersEnabled;
     syncModifiers();
     updateModifierDisplayValues();
     reRenderDecisions();
+}
+chrome.storage.sync.get('decisionModifiers', data => applyDecisionSettings(data.decisionModifiers));
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync' && changes.decisionModifiers) applyDecisionSettings(changes.decisionModifiers.newValue);
 });

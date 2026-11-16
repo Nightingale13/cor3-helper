@@ -1,5 +1,6 @@
 // content-early shared mutable state
 // All cross-module mutable variables live here so every module can read/write them.
+import { freshMarketFailure } from '../shared/market-reachability.js';
 
 export const OrigWebSocket = window.WebSocket;
 
@@ -43,11 +44,28 @@ export const USOL_SERVER_ID = '019e4052-c317-7388-9d71-883ffb1560cd';
 // Each entry: { blockerName, maintenanceEndsAt (ISO string or null), detectedAt (ms timestamp) }
 // Other sections check this before starting a path-through to avoid redundant hacking.
 window.__cor3UnreachableMarkets = {};
+const marketAccessRevision = {};
+export function getMarketAccessRevision(type) { return marketAccessRevision[type] || 0; }
+export function markMarketReachable(type) {
+    if (!['usol', 'soyuz', 'dark'].includes(type)) return;
+    marketAccessRevision[type] = getMarketAccessRevision(type) + 1;
+    delete window.__cor3UnreachableMarkets[type];
+    window.postMessage({ type: 'COR3_WS_MARKET_REACHABLE', marketType: type, checkedAt: Date.now() }, '*');
+}
+export function invalidateMarketBlockage(type) {
+    if (!window.__cor3UnreachableMarkets[type]) return;
+    delete window.__cor3UnreachableMarkets[type];
+    window.postMessage({ type: 'COR3_WS_MARKET_RECHECK', marketType: type, checkedAt: Date.now() }, '*');
+}
 
 // Check if a market is still known-unreachable (maintenance not yet expired)
 window.__cor3IsMarketUnreachable = function (marketType) {
     var entry = window.__cor3UnreachableMarkets[marketType];
     if (!entry) return null;
+    if (!freshMarketFailure(false, entry.detectedAt)) {
+        delete window.__cor3UnreachableMarkets[marketType];
+        return null;
+    }
     if (entry.maintenanceEndsAt) {
         var endsAt = new Date(entry.maintenanceEndsAt).getTime();
         if (Date.now() >= endsAt) {

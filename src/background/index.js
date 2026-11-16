@@ -5,6 +5,7 @@ import { getCor3Tab } from './helpers.js';
 import { checkAutoChooseBackground } from './auto-choose.js';
 import { scheduleAutoFinishAllBg, scheduleAutoFinishAllBgDebounced, runAutoFinishAllBg, collectJobsBg } from './auto-finish-jobs.js';
 import { MARKET_RESET_DURATIONS_MS } from '../shared/server-constants.js';
+import { isMinigameLocked } from '../shared/job-retry.js';
 
 // --- Keep-alive ---
 async function keepWorkerAlive() {
@@ -79,20 +80,20 @@ chrome.storage.onChanged.addListener((changes, area) => {
                 let tracker = Array.isArray(result.autoJobsTracker) ? result.autoJobsTracker : [];
                 let cr = Array.isArray(result.autoJobsCompletedResults) ? result.autoJobsCompletedResults : [];
                 if (homeReset) {
-                    tracker = tracker.filter(j => (j.marketKey || 'home') !== 'home');
-                    cr = cr.filter(j => j.marketKey !== 'home');
+                    tracker = tracker.filter(j => (j.marketKey || 'home') !== 'home' || isMinigameLocked(j, now));
+                    cr = cr.filter(j => j.marketKey !== 'home' || isMinigameLocked(j, now));
                 }
                 if (darkReset) {
-                    tracker = tracker.filter(j => j.marketKey !== 'dark');
-                    cr = cr.filter(j => j.marketKey !== 'dark');
+                    tracker = tracker.filter(j => j.marketKey !== 'dark' || isMinigameLocked(j, now));
+                    cr = cr.filter(j => j.marketKey !== 'dark' || isMinigameLocked(j, now));
                 }
                 if (soyuzReset) {
-                    tracker = tracker.filter(j => j.marketKey !== 'soyuz');
-                    cr = cr.filter(j => j.marketKey !== 'soyuz');
+                    tracker = tracker.filter(j => j.marketKey !== 'soyuz' || isMinigameLocked(j, now));
+                    cr = cr.filter(j => j.marketKey !== 'soyuz' || isMinigameLocked(j, now));
                 }
                 if (usolReset) {
-                    tracker = tracker.filter(j => j.marketKey !== 'usol');
-                    cr = cr.filter(j => j.marketKey !== 'usol');
+                    tracker = tracker.filter(j => j.marketKey !== 'usol' || isMinigameLocked(j, now));
+                    cr = cr.filter(j => j.marketKey !== 'usol' || isMinigameLocked(j, now));
                 }
                 chrome.storage.local.set({ autoJobsTracker: tracker, autoJobsCompletedResults: cr });
             });

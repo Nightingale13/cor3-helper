@@ -43,7 +43,7 @@ export var _forceMaintenanceRunning = false;
 export function setForceMaintenanceRunning(v) { _forceMaintenanceRunning = v; }
 
 // ---- Wired utility instances ----
-export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD');
+export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD', 'auto-valuable');
 export var delay = createDelay(isAborted);
 export var waitForEvent = createWaitForEvent(isAborted);
 export var log = createLogger('[COR3 ValuableSeller]', 'COR3_VALUABLE_LOG');

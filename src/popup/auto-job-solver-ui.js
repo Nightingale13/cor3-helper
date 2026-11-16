@@ -3,6 +3,8 @@ import { _h, _clearEl, _safeSetHtml } from './dom-helpers.js';
 import { getCor3Tab, formatTimeRemaining, updateSelectAllState } from './utils.js';
 import { findMaintenanceBlocker } from '../shared/server-map.js';
 import { MARKET_RESET_DURATIONS_MS } from '../shared/server-constants.js';
+import { ensureGameConnection, sendGameMessage } from '../shared/game-connection.js';
+import { isMinigameLocked } from '../shared/job-retry.js';
 
 const autoJobSolverToggle = document.getElementById('autoJobSolverToggle');
 const autoJobSolverStatus = document.getElementById('autoJobSolverStatus');
@@ -132,11 +134,11 @@ function switchAutoJobsTab(market) {
 async function renderAutoJobsTabs() {
     const { marketData, darkMarketData, darkMarketAvailable, darkMarketMaintenanceEndsAt, darkMarketBlockerServer, soyuzMarketData, soyuzMarketAvailable, soyuzMarketMaintenanceEndsAt, soyuzMarketBlockerServer, usolMarketData, usolMarketAvailable, usolMarketMaintenanceEndsAt, usolMarketBlockerServer, serverMaintenanceMap } = await chrome.storage.local.get(['marketData', 'darkMarketData', 'darkMarketAvailable', 'darkMarketMaintenanceEndsAt', 'darkMarketBlockerServer', 'soyuzMarketData', 'soyuzMarketAvailable', 'soyuzMarketMaintenanceEndsAt', 'soyuzMarketBlockerServer', 'usolMarketData', 'usolMarketAvailable', 'usolMarketMaintenanceEndsAt', 'usolMarketBlockerServer', 'serverMaintenanceMap']);
     renderAutoJobsMarket(autoJobsContentHome, marketData, 'home');
-    const darkB = darkMarketAvailable === false ? null : findMaintenanceBlocker(serverMaintenanceMap, 'dark');
+    const darkB = darkMarketAvailable != null ? null : findMaintenanceBlocker(serverMaintenanceMap, 'dark');
     renderAutoJobsMarket(autoJobsContentDark, darkMarketData, 'dark', darkB ? false : darkMarketAvailable, darkB ? darkB.maintenanceEndsAt : darkMarketMaintenanceEndsAt, darkB ? darkB.blockerName : darkMarketBlockerServer);
-    const soyuzB = soyuzMarketAvailable === false ? null : findMaintenanceBlocker(serverMaintenanceMap, 'soyuz');
+    const soyuzB = soyuzMarketAvailable != null ? null : findMaintenanceBlocker(serverMaintenanceMap, 'soyuz');
     renderAutoJobsMarket(autoJobsContentSoyuz, soyuzMarketData, 'soyuz', soyuzB ? false : soyuzMarketAvailable, soyuzB ? soyuzB.maintenanceEndsAt : soyuzMarketMaintenanceEndsAt, soyuzB ? soyuzB.blockerName : soyuzMarketBlockerServer);
-    const usolB = usolMarketAvailable === false ? null : findMaintenanceBlocker(serverMaintenanceMap, 'usol');
+    const usolB = usolMarketAvailable != null ? null : findMaintenanceBlocker(serverMaintenanceMap, 'usol');
     renderAutoJobsMarket(autoJobsContentUsol, usolMarketData, 'usol', usolB ? false : usolMarketAvailable, usolB ? usolB.maintenanceEndsAt : usolMarketMaintenanceEndsAt, usolB ? usolB.blockerName : usolMarketBlockerServer);
     if (marketData && marketData.market && marketData.market.marketName) {
         autoJobsTabHome.textContent = '🏠 ' + marketData.market.marketName;
@@ -582,17 +584,21 @@ autoJobsStartBtn.addEventListener('click', async () => {
         renderDebugJobs();
         addAutoJobLog(`Starting auto jobs: ${jobsToRun.length} job(s) queued.`, 'info');
 
-        await chrome.storage.local.set({ autoJobsRunning: true, autoJobsQueue: jobsToRun, autoJobsTracker: autoJobsTracker });
         try {
             const tab = await getCor3Tab();
-            if (tab) {
-                await chrome.tabs.sendMessage(tab.id, {
-                    action: "startAutoJobs",
-                    jobs: jobsToRun,
-                    settings: {}
-                });
-            }
+            if (!tab) throw new Error('Open cor3.gg before starting Auto Jobs.');
+            await ensureGameConnection(tab.id);
+            await chrome.storage.local.set({ autoJobsRunning: true, autoJobsQueue: jobsToRun, autoJobsTracker: autoJobsTracker });
+            await sendGameMessage(tab.id, {
+                action: "startAutoJobs",
+                jobs: jobsToRun,
+                settings: {}
+            });
         } catch (e) {
+            autoJobsRunning = false;
+            autoJobsStartBtn.textContent = '▶ Start Auto Jobs';
+            autoJobsStartBtn.className = 'auto-jobs-btn-start start';
+            await chrome.storage.local.set({ autoJobsRunning: false, autoJobsQueue: [] });
             addAutoJobLog('Failed to send auto jobs to content script: ' + e.message, 'error');
         }
     }
@@ -1033,6 +1039,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
             const resetMarkets = [homeReset && 'HOME', darkReset && 'D4RK', soyuzReset && 'SOYUZ', usolReset && 'USOL'].filter(Boolean).join(', ');
             addAutoJobLog('Job reset detected (' + resetMarkets + ') — clearing old tracker/results', 'info');
             autoJobsTracker = autoJobsTracker.filter(j => {
+                if (isMinigameLocked(j, now)) return true;
                 if (homeReset && (j.marketKey || 'home') === 'home') return false;
                 if (darkReset && j.marketKey === 'dark') return false;
                 if (soyuzReset && j.marketKey === 'soyuz') return false;
@@ -1041,10 +1048,10 @@ chrome.storage.onChanged.addListener((changes, area) => {
             });
             chrome.storage.local.get('autoJobsCompletedResults', (result) => {
                 let cr = Array.isArray(result.autoJobsCompletedResults) ? result.autoJobsCompletedResults : [];
-                if (homeReset) cr = cr.filter(j => j.marketKey !== 'home');
-                if (darkReset) cr = cr.filter(j => j.marketKey !== 'dark');
-                if (soyuzReset) cr = cr.filter(j => j.marketKey !== 'soyuz');
-                if (usolReset) cr = cr.filter(j => j.marketKey !== 'usol');
+                if (homeReset) cr = cr.filter(j => j.marketKey !== 'home' || isMinigameLocked(j, now));
+                if (darkReset) cr = cr.filter(j => j.marketKey !== 'dark' || isMinigameLocked(j, now));
+                if (soyuzReset) cr = cr.filter(j => j.marketKey !== 'soyuz' || isMinigameLocked(j, now));
+                if (usolReset) cr = cr.filter(j => j.marketKey !== 'usol' || isMinigameLocked(j, now));
                 chrome.storage.local.set({ autoJobsCompletedResults: cr, autoJobsTracker: autoJobsTracker });
                 if (autoJobSolverToggle.checked) renderAutoJobsTabs();
                 if (autoJobsDebugToggle.checked) renderDebugJobs();

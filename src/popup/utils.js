@@ -1,6 +1,8 @@
+import { isGameUrl } from '../shared/game-connection.js';
+
 export async function getCor3Tab() {
     const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab && activeTab.url && (activeTab.url.includes('cor3.gg') || activeTab.url.includes('os.cor3.gg'))) {
+    if (activeTab && isGameUrl(activeTab.url)) {
         return activeTab;
     }
     const allTabs = await chrome.tabs.query({ url: ['https://cor3.gg/*', 'https://os.cor3.gg/*'] });

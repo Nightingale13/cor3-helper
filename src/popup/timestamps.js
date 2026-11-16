@@ -1,4 +1,4 @@
-import { showLastUpdated } from './utils.js';
+import { showLastUpdated, formatTimeAgo } from './utils.js';
 
 const dailyLastUpdated = document.getElementById('dailyLastUpdated');
 const coreMarketLastUpdated = document.getElementById('coreMarketLastUpdated');
@@ -13,17 +13,25 @@ const archivedExpLastUpdated = document.getElementById('archivedExpLastUpdated')
 const mercenariesLastUpdated = document.getElementById('mercenariesLastUpdated');
 const loadoutLastUpdated = document.getElementById('loadoutLastUpdated');
 
+function showLatestUpdated(element, keys) {
+    if (!element) return;
+    chrome.storage.local.get(keys, result => {
+        const timestamp = Math.max(0, ...keys.map(key => Number(result[key]) || 0));
+        element.textContent = timestamp ? formatTimeAgo(timestamp) : '';
+    });
+}
+
 export function refreshAllTimestamps() {
     showLastUpdated(dailyLastUpdated, 'dailyOpsUpdatedAt');
     showLastUpdated(coreMarketLastUpdated, 'marketDataUpdatedAt');
     showLastUpdated(darkMarketLastUpdated, 'darkMarketDataUpdatedAt');
     showLastUpdated(soyuzMarketLastUpdated, 'soyuzMarketDataUpdatedAt');
     showLastUpdated(usolMarketLastUpdated, 'usolMarketDataUpdatedAt');
-    showLastUpdated(expeditionLastUpdated, 'expeditionsDataUpdatedAt');
-    showLastUpdated(decisionLastUpdated, 'expeditionsDataUpdatedAt');
-    showLastUpdated(personalDroneLastUpdated, 'expeditionsDataUpdatedAt');
+    showLatestUpdated(expeditionLastUpdated, ['expeditionsDataUpdatedAt', 'droneDataUpdatedAt', 'droneMissionUpdatedAt']);
+    showLatestUpdated(decisionLastUpdated, ['expeditionsDataUpdatedAt', 'droneMissionUpdatedAt', 'droneDataUpdatedAt']);
+    showLastUpdated(personalDroneLastUpdated, 'droneDataUpdatedAt');
     if (inventoryLastUpdated) showLastUpdated(inventoryLastUpdated, 'stashDataUpdatedAt');
-    if (archivedExpLastUpdated) showLastUpdated(archivedExpLastUpdated, 'archivedExpeditionsUpdatedAt');
+    if (archivedExpLastUpdated) showLatestUpdated(archivedExpLastUpdated, ['archivedExpeditionsUpdatedAt', 'droneArchivedUpdatedAt']);
     if (mercenariesLastUpdated) showLastUpdated(mercenariesLastUpdated, 'mercenariesUpdatedAt');
     if (loadoutLastUpdated) showLastUpdated(loadoutLastUpdated, 'loadoutUpdatedAt');
 }

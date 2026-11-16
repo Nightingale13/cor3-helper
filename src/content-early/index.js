@@ -7,6 +7,7 @@ window.__cor3WsInterceptorActive = true;
 
 // 1. Shared state (constants, globals, mutable vars)
 import './state.js';
+import { installInteractionGuard } from './interaction-guard.js';
 
 // 2. WS proxy (intercepts WebSocket constructor, tracks sockets)
 import { installWebSocketProxy } from './ws-proxy.js';
@@ -24,7 +25,7 @@ import { handleWsMessage, setPostUnreachable } from './ws-message-handler.js';
 // 6. WS commands (window.__cor3* send wrappers)
 import './ws-commands.js';
 
-// 7. Expeditions (request, respond, mercs, launch, collect)
+// 7. Expeditions (request, respond, mercs, launch, mail)
 import './expeditions.js';
 
 // 8. Market requests (HOME, D4RK, SOYUZ, USOL — full, jobs-only, path-through, refresh)
@@ -40,6 +41,7 @@ import { installMessageListener, installSocketHealthCheck, scheduleVersionRepost
 (function () {
     // Wire the postUnreachable callback into ws-message-handler to break circular dep
     setPostUnreachable(__cor3PostUnreachable);
+    installInteractionGuard();
     installWebSocketProxy(handleWsMessage);
     installHttpIntercept();
     installSocketHealthCheck();

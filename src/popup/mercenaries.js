@@ -3,8 +3,9 @@ import { _h, _noData, _clearEl, _safeSetHtml } from './dom-helpers.js';
 import { getCor3Tab, waitForStorageKey } from './utils.js';
 import { refreshAllTimestamps } from './timestamps.js';
 import { state } from './state.js';
-import { findMaintenanceBlocker } from '../shared/server-map.js';
+import { freshMarketFailure, MARKET_RECHECK_MS } from '../shared/market-reachability.js';
 import { loadExpeditions } from './expeditions.js';
+import { mercenaryWarning } from '../shared/merc-status.js';
 
 const mercenariesSectionToggle = document.getElementById('mercenariesSectionToggle');
 const mercenariesSectionBody = document.getElementById('mercenariesSectionBody');
@@ -14,6 +15,7 @@ const autoSendMercenaryToggle = document.getElementById('autoSendMercenaryToggle
 const autoChooseMercToggle = document.getElementById('autoChooseMercToggle');
 const autoChooseUsolFirstToggle = document.getElementById('autoChooseUsolFirstToggle');
 const insureHighRiskToggle = document.getElementById('insureHighRiskToggle');
+const keepMercCreditReserveToggle = document.getElementById('keepMercCreditReserveToggle');
 const ignoreEliteMercToggle = document.getElementById('ignoreEliteMercToggle');
 const applyMercCostLimiterToggle = document.getElementById('applyMercCostLimiterToggle');
 const maxMercCostInput = document.getElementById('maxMercCostInput');
@@ -30,24 +32,19 @@ const mercWarning = document.getElementById('mercWarning');
 
 let selectedMercenaryId = null;
 let mercRestTimers = {};
+let warningSettings = null;
+let cachedWarning = null;
+let cachedRecovery = null;
 
 export function updateMercWarning(settings) {
+    warningSettings = settings;
     if (!mercWarning) return;
-    if (settings && settings.disabledReason === 'stash_full' && !settings.enabled) {
-        mercWarning.textContent = '⚠️ Stash is full — auto-send mercenary disabled. Clear stash and re-enable auto-send to resume.';
-        mercWarning.style.borderColor = 'var(--accent-orange)';
-        mercWarning.style.color = 'var(--accent-orange)';
-        mercWarning.style.background = 'rgba(255,160,0,0.15)';
-        mercWarning.style.display = '';
-    } else if (settings && settings.disabledReason === 'insufficient_credits' && !settings.enabled) {
-        mercWarning.textContent = '⚠️ Insufficient credits — auto-send mercenary disabled. Earn more credits and re-enable auto-send to resume.';
-        mercWarning.style.borderColor = 'var(--accent-red, #ff4444)';
-        mercWarning.style.color = 'var(--accent-red, #ff4444)';
-        mercWarning.style.background = 'rgba(255,68,68,0.15)';
-        mercWarning.style.display = '';
-    } else {
-        mercWarning.style.display = 'none';
-    }
+    const warning = mercenaryWarning(settings, cachedWarning, cachedRecovery);
+    mercWarning.style.display = warning ? '' : 'none';
+    if (!warning) return;
+    mercWarning.textContent = '⚠️ ' + warning.message;
+    mercWarning.style.borderColor = mercWarning.style.color = warning.danger ? 'var(--accent-red, #ff4444)' : 'var(--accent-orange)';
+    mercWarning.style.background = warning.danger ? 'rgba(255,68,68,0.15)' : 'rgba(255,160,0,0.15)';
 }
 
 mercenariesSectionToggle.addEventListener('click', () => {
@@ -77,6 +74,7 @@ if (refreshMercenariesBtn) {
 
 // Load/save auto-send settings
 chrome.storage.sync.get('autoSendMerc', (data) => {
+    if (keepMercCreditReserveToggle) keepMercCreditReserveToggle.checked = data.autoSendMerc?.keepCreditReserve !== false;
     if (data.autoSendMerc) {
         autoSendMercenaryToggle.checked = !!data.autoSendMerc.enabled;
         if (autoChooseMercToggle) autoChooseMercToggle.checked = !!data.autoSendMerc.autoChooseMerc;
@@ -94,14 +92,10 @@ chrome.storage.sync.get('autoSendMerc', (data) => {
         updateMercWarning(data.autoSendMerc);
     }
 });
-chrome.storage.local.get('mercWarning', (data) => {
-    if (data.mercWarning && mercWarning) {
-        mercWarning.textContent = '⚠️ ' + data.mercWarning;
-        mercWarning.style.borderColor = 'var(--accent-orange)';
-        mercWarning.style.color = 'var(--accent-orange)';
-        mercWarning.style.background = 'rgba(255,160,0,0.15)';
-        mercWarning.style.display = '';
-    }
+chrome.storage.local.get(['mercWarning', 'autoSendRecovery'], (data) => {
+    cachedWarning = data.mercWarning;
+    cachedRecovery = data.autoSendRecovery;
+    updateMercWarning(warningSettings);
 });
 
 function saveAutoSendMercSettings() {
@@ -112,16 +106,18 @@ function saveAutoSendMercSettings() {
             console.log("saveAutoSendMercSettings: " + autoChooseMercToggle.checked);
             chrome.storage.sync.set({
                 autoSendMerc: {
+                    ...existing,
                     enabled: isEnabling,
                     autoChooseMerc: autoChooseMercToggle ? autoChooseMercToggle.checked : false,
                     autoChooseUsolFirst: autoChooseUsolFirstToggle ? autoChooseUsolFirstToggle.checked : false,
                     insureHighRisk: insureHighRiskToggle ? insureHighRiskToggle.checked : false,
+                    keepCreditReserve: keepMercCreditReserveToggle ? keepMercCreditReserveToggle.checked : existing.keepCreditReserve !== false,
                     ignoreEliteMerc: ignoreEliteMercToggle ? ignoreEliteMercToggle.checked : false,
                     applyMercCostLimiter: applyMercCostLimiterToggle ? applyMercCostLimiterToggle.checked : false,
                     maxMercCost: maxMercCostInput ? parseInt(maxMercCostInput.value, 10) || 15000 : 15000,
                     mercenaryId: selectedMercenaryId,
                     mercenaryName: selectedMercenaryName ? selectedMercenaryName.textContent : '',
-                    disabledReason: isEnabling ? null : (existing.disabledReason || null)
+                    disabledReason: null
                 }
             });
         });
@@ -146,6 +142,7 @@ function saveInsureHighRiskSetting() {
 autoSendMercenaryToggle.addEventListener('change', () => {
     saveAutoSendMercSettings();
     if (autoSendMercenaryToggle.checked) {
+        cachedWarning = null;
         updateMercWarning(null);
         chrome.storage.local.remove(['expeditionLaunchError', 'mercWarning']);
         loadExpeditions();
@@ -166,6 +163,14 @@ if (autoChooseUsolFirstToggle) {
 }
 if (insureHighRiskToggle) {
     insureHighRiskToggle.addEventListener('change', saveInsureHighRiskSetting);
+}
+if (keepMercCreditReserveToggle) {
+    keepMercCreditReserveToggle.addEventListener('change', () => {
+        if (state.isHelper) return;
+        chrome.storage.sync.get('autoSendMerc', data => chrome.storage.sync.set({
+            autoSendMerc: { ...(data.autoSendMerc || {}), keepCreditReserve: keepMercCreditReserveToggle.checked }
+        }));
+    });
 }
 if (ignoreEliteMercToggle) {
     ignoreEliteMercToggle.addEventListener('change', () => {
@@ -216,7 +221,7 @@ if (autoSellCheapestToggle) {
 }
 
 export async function loadMercenaries() {
-    const { mercenariesData, usolMercenariesData, mercConfigData, usolMarketAvailable, usolMarketMaintenanceEndsAt, usolMarketBlockerServer, serverMaintenanceMap } = await chrome.storage.local.get(['mercenariesData', 'usolMercenariesData', 'mercConfigData', 'usolMarketAvailable', 'usolMarketMaintenanceEndsAt', 'usolMarketBlockerServer', 'serverMaintenanceMap']);
+    const { mercenariesData, usolMercenariesData, mercConfigData, usolMarketAvailable, usolMarketMaintenanceEndsAt, usolMarketBlockerServer, usolMarketReachabilityCheckedAt } = await chrome.storage.local.get(['mercenariesData', 'usolMercenariesData', 'mercConfigData', 'usolMarketAvailable', 'usolMarketMaintenanceEndsAt', 'usolMarketBlockerServer', 'usolMarketReachabilityCheckedAt']);
     function attachConfigs(data) {
         if (!data || !mercConfigData) return;
         let mercs = data;
@@ -236,8 +241,9 @@ export async function loadMercenaries() {
     }
     attachConfigs(mercenariesData);
     attachConfigs(usolMercenariesData);
-    const usolB = usolMarketAvailable === false ? null : findMaintenanceBlocker(serverMaintenanceMap, 'usol');
-    renderMercenaries(mercenariesData, usolMercenariesData, usolB ? false : usolMarketAvailable, usolB ? usolB.maintenanceEndsAt : usolMarketMaintenanceEndsAt, usolB ? usolB.blockerName : usolMarketBlockerServer);
+    const unavailable = freshMarketFailure(usolMarketAvailable, usolMarketReachabilityCheckedAt);
+    renderMercenaries(mercenariesData, usolMercenariesData, unavailable ? false : usolMarketAvailable === false ? null : usolMarketAvailable,
+        usolMarketMaintenanceEndsAt, usolMarketBlockerServer, usolMarketReachabilityCheckedAt);
     refreshAllTimestamps();
 }
 
@@ -328,7 +334,7 @@ function buildMercCard(merc, isElite) {
     return card;
 }
 
-function renderMercenaries(coreData, usolData, usolAvailable, usolMaintenanceEndsAt, usolBlockerServer) {
+function renderMercenaries(coreData, usolData, usolAvailable, usolMaintenanceEndsAt, usolBlockerServer, checkedAt) {
     if (!mercenariesContainer) return;
     _clearEl(mercenariesContainer);
 
@@ -343,7 +349,9 @@ function renderMercenaries(coreData, usolData, usolAvailable, usolMaintenanceEnd
             }
         }
         if (timerHtml) timerHtml += ')';
-        mercenariesContainer.appendChild(_h('div', {className: 'warning-banner'}, '⚠️ USOL market is currently unreachable' + timerHtml + '. USOL mercenaries may be unavailable.'));
+        const banner = _h('div', {className: 'warning-banner'}, '⚠️ USOL market could not be reached on the last check' + timerHtml + '.');
+        mercenariesContainer.appendChild(banner);
+        setTimeout(() => banner.remove(), Math.max(0, checkedAt + MARKET_RECHECK_MS - Date.now()));
     }
 
     const coreParsed = parseMercList(coreData);
@@ -399,7 +407,7 @@ function renderMercenaries(coreData, usolData, usolAvailable, usolMaintenanceEnd
     const hasUsol = usolParsed.mercs.length > 0 || usolParsed.eliteSlots.length > 0;
 
     if (!hasCore && !hasUsol) {
-        mercenariesContainer.replaceChildren(_noData('No mercenaries found.'));
+        mercenariesContainer.appendChild(_noData('No mercenaries found.'));
         return;
     }
 
@@ -482,18 +490,16 @@ setInterval(() => {
 // Storage listener for mercenary data updates
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.mercenariesData || changes.usolMercenariesData || changes.mercConfigData || changes.usolMarketAvailable || changes.serverMaintenanceMap) {
+    if (changes.mercenariesData || changes.usolMercenariesData || changes.mercConfigData || changes.usolMarketAvailable || changes.usolMarketReachabilityCheckedAt) {
         loadMercenaries();
     }
     if (changes.mercWarning) {
-        const val = changes.mercWarning.newValue;
-        if (val && mercWarning) {
-            mercWarning.textContent = '⚠️ ' + val;
-            mercWarning.style.borderColor = 'var(--accent-orange)';
-            mercWarning.style.color = 'var(--accent-orange)';
-            mercWarning.style.background = 'rgba(255,160,0,0.15)';
-            mercWarning.style.display = '';
-        }
+        cachedWarning = changes.mercWarning.newValue;
+        updateMercWarning(warningSettings);
+    }
+    if (changes.autoSendRecovery) {
+        cachedRecovery = changes.autoSendRecovery.newValue;
+        updateMercWarning(warningSettings);
     }
 });
 
@@ -503,6 +509,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
         const val = changes.autoSendMerc.newValue;
         if (val) {
             autoSendMercenaryToggle.checked = !!val.enabled;
+            if (keepMercCreditReserveToggle) keepMercCreditReserveToggle.checked = val.keepCreditReserve !== false;
             updateMercWarning(val);
         }
     }

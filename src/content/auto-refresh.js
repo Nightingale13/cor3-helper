@@ -1,7 +1,7 @@
 // Auto-Refresh for Market Job Timers
 
 import { isContextValid } from './helpers.js';
-import { _seqRefreshRunning, _autoJobsActive, _marketRefreshInProgress, _autoUpdateMarketsLastRefresh, setSeqRefreshRunning, setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, _autoUpdateMarkets, _initAutoUpdateMarketsTimer, setAutoUpdateMarkets } from './auto-update-markets.js';
+import { _seqRefreshRunning, _autoJobsActive, _marketRefreshInProgress, _autoUpdateMarketsLastRefresh, setSeqRefreshRunning, setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, _autoUpdateMarkets, _initAutoUpdateMarketsTimer, setAutoUpdateMarkets, queueMarketRefresh } from './auto-update-markets.js';
 import { _initialFetchDone } from './auto-send.js';
 
 let autoRefreshSettings = { home_jobs: false, dark_jobs: false, soyuz_jobs: false, usol_jobs: false };
@@ -103,29 +103,15 @@ async function checkAutoRefresh() {
             if (expiredMarkets.includes('dark_jobs')) order.push('dark');
             if (expiredMarkets.includes('home_jobs')) order.push('home');
 
-            setMarketRefreshInProgress(true);
             setAutoUpdateMarketsLastRefresh(Date.now());
             var msg = { type: 'COR3_REFRESH_ALL_MARKETS_SEQ' };
             if (order.length > 0) msg.order = order;
-            window.postMessage(msg, '*');
-
-            setTimeout(() => {
+            queueMarketRefresh('auto-refresh-markets', msg, () => {
                 setSeqRefreshRunning(false);
                 for (const key of ['home_jobs', 'dark_jobs', 'soyuz_jobs', 'usol_jobs']) {
                     autoRefreshRetryPending[key] = false;
                 }
-            }, 30000);
-
-            function onAllDone(evt) {
-                if (evt.data && evt.data.type === 'COR3_ALL_MARKETS_REFRESHED') {
-                    window.removeEventListener('message', onAllDone);
-                    setSeqRefreshRunning(false);
-                    for (const key of ['home_jobs', 'dark_jobs', 'soyuz_jobs', 'usol_jobs']) {
-                        autoRefreshRetryPending[key] = false;
-                    }
-                }
-            }
-            window.addEventListener('message', onAllDone);
+            });
         }
     } catch (e) {
         if (e.message && e.message.includes('Extension context invalidated')) return;

@@ -5,11 +5,15 @@ import { state, sendCmd, log } from './state.js';
 import { processQueue } from './main-loop.js';
 
 (function () {
+    if (window.__cor3AutoJobEngineLoaded) return;
+    window.__cor3AutoJobEngineLoaded = true;
     // ---- Listen for start/stop commands ----
     window.addEventListener('message', function (event) {
         if (event.source !== window) return;
 
         if (event.data && event.data.type === 'COR3_AUTOJOB_START') {
+            if (state.running) { log('Auto Jobs is already running; keeping the current queue.', 'warn'); return; }
+            state.abortFlag = false;
             state.jobQueue = event.data.jobs || [];
             state.solverSettings = event.data.settings || {};
             processQueue();

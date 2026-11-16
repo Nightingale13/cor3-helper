@@ -24,21 +24,29 @@ export function stopDecryptSolver() {
 let dailyHackInjected = false;
 
 export function injectDailyHackSolver() {
-    if (dailyHackInjected) {
-        window.postMessage({ type: 'COR3_STOP_DAILY_HACK' }, '*');
-        dailyHackInjected = false;
-        setTimeout(() => injectDailyHackSolver(), 300);
-        return;
-    }
+    if (dailyHackInjected) return;
     dailyHackInjected = true;
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('daily-hack-solver.js');
-    script.onload = () => script.remove();
-    (document.head || document.documentElement).appendChild(script);
+    return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = chrome.runtime.getURL('daily-hack-solver.js');
+        const timeout = setTimeout(() => failed('Timed out loading daily hack solver.'), 10000);
+        function failed(message) {
+            clearTimeout(timeout);
+            script.remove();
+            dailyHackInjected = false;
+            reject(new Error(message));
+        }
+        script.onload = () => { clearTimeout(timeout); script.remove(); resolve(); };
+        script.onerror = () => failed('Could not load daily hack solver.');
+        (document.head || document.documentElement).appendChild(script);
+    });
 }
 
 export function stopDailyHackSolver() {
     window.postMessage({ type: 'COR3_STOP_DAILY_HACK' }, '*');
+}
+
+export function dailyHackSolverFinished() {
     dailyHackInjected = false;
 }
 
@@ -83,29 +91,30 @@ export function stopSimpleDecryptSolver() {
 }
 
 // --- Auto Job Solver Engine Injection ---
-let autoJobSolverInjected = false;
+const engineLoads = new Map();
+
+function loadEngine(file) {
+    if (engineLoads.has(file)) return engineLoads.get(file);
+    const loading = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = chrome.runtime.getURL(file);
+        const timeout = setTimeout(() => { script.remove(); reject(new Error('Timed out loading ' + file)); }, 10000);
+        script.onload = () => { clearTimeout(timeout); script.remove(); resolve(); };
+        script.onerror = () => { clearTimeout(timeout); script.remove(); reject(new Error('Could not load ' + file)); };
+        (document.head || document.documentElement).appendChild(script);
+    });
+    const result = loading.catch(error => { if (engineLoads.get(file) === result) engineLoads.delete(file); throw error; });
+    engineLoads.set(file, result);
+    return result;
+}
 
 export function injectAutoJobSolver() {
-    if (autoJobSolverInjected) return;
-    autoJobSolverInjected = true;
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('auto-job-solver.js');
-    script.onload = () => script.remove();
-    (document.head || document.documentElement).appendChild(script);
-    console.log('[COR3 Helper] Auto Job Solver engine injected');
+    return loadEngine('auto-job-solver.js');
 }
 
 // --- Auto Valuable Seller Engine Injection ---
-let autoValuableSellerInjected = false;
-
 export function injectAutoValuableSeller() {
-    if (autoValuableSellerInjected) return;
-    autoValuableSellerInjected = true;
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('auto-valuable-seller.js');
-    script.onload = () => script.remove();
-    (document.head || document.documentElement).appendChild(script);
-    console.log('[COR3 Helper] Auto Valuable Seller engine injected');
+    return loadEngine('auto-valuable-seller.js');
 }
 
 export function ensureAntiAfkEnabled() {

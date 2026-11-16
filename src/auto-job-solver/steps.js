@@ -1,23 +1,25 @@
 // Auto Job Solver — step functions (set endpoint, login, take job, complete job, discover folder).
 
-import { getMarketNameById } from '../shared/server-constants.js';
+import { getMarketNameById, MARKET_IDS, MARKET_SERVER_IDS } from '../shared/server-constants.js';
+import { readJobMarket } from './market-read.js';
 import { humanDelay, safeTimeout, safeClearTimeout } from '../shared/ws-utils.js';
 import { formatMinigameLockError, ensureDecryptSolverEnabled, ensureIceWallSolverEnabled, ensureSimpleDecryptSolverEnabled } from '../shared/hack-utils.js';
 import { friendlyError } from '../shared/error-map.js';
-import { state, serverMap, sendCmd, delay, waitForEvent, log, waitForHackToBeDone, DARK_MARKET_SERVER_ID, SOYUZ_MARKET_SERVER_ID, USOL_MARKET_SERVER_ID } from './state.js';
+import { state, serverMap, sendCmd, delay, waitForEvent, log, waitForHackToBeDone } from './state.js';
 import { getServerNameById, getPathForServerId, checkPathMaintenance, fetchMapData, tryLoadoutSwapForError, jobLabel } from './helpers.js';
 
 // Internal: send set.endpoint and wait for result
 async function _sendSetEndpoint(serverId) {
-    sendCmd('set.endpoint', { serverId: serverId });
-    return await new Promise(function (resolve) {
+    return await new Promise(function (resolve, reject) {
         var timer;
         function endpointHandler(evt) {
             if (evt.data && evt.data.type === 'COR3_WS_ENDPOINT_RESULT') {
                 cleanup();
                 if (evt.data.success === false && evt.data.error &&
-                    (evt.data.error.message === 'no-path-to-server' || evt.data.error.message === 'server-in-maintenance')) {
+                    ['no-path-to-server', 'server-in-maintenance', 'market-not-reachable'].includes(evt.data.error.message)) {
                     resolve({ ok: false, unreachable: true, errorMsg: evt.data.error.message });
+                } else if (evt.data.success === false || evt.data.error) {
+                    reject(new Error(evt.data.error?.message || 'Endpoint switch was rejected'));
                 } else {
                     resolve({ ok: true, data: evt.data });
                 }
@@ -33,17 +35,18 @@ async function _sendSetEndpoint(serverId) {
         }
         window.addEventListener('message', endpointHandler);
         timer = safeTimeout(function () {
-            window.removeEventListener('message', endpointHandler);
-            resolve({ ok: true, timeout: true });
+            cleanup();
+            reject(new Error('Endpoint switch timed out'));
         }, 10000);
+        sendCmd('set.endpoint', { serverId: serverId });
     });
 }
 
 // Step: Set endpoint to target server, with path-through hack on failure
-export async function stepSetEndpoint(serverId) {
+export async function stepSetEndpoint(serverId, force = false) {
     var endpointLabel = getServerNameById(serverId) || serverId;
 
-    if (state._lastEndpointServerId === serverId) {
+    if (!force && state._lastEndpointServerId === serverId) {
         log('Endpoint already set to ' + endpointLabel + ' — skipping duplicate set.endpoint');
         return;
     }
@@ -51,6 +54,7 @@ export async function stepSetEndpoint(serverId) {
     await fetchMapData(true);
 
     log('Setting endpoint to ' + endpointLabel);
+    state._lastEndpointServerId = null;
     var raceResult = await _sendSetEndpoint(serverId);
 
     if (raceResult.unreachable) {
@@ -141,11 +145,32 @@ export async function stepSetEndpoint(serverId) {
         }
     }
 
-    if (raceResult.timeout) {
-        log('Endpoint set timeout (may already be set)', 'warn');
-    }
     state._lastEndpointServerId = serverId;
     await delay(humanDelay());
+}
+
+export async function stepEnsureMarket(job) {
+    const key = Object.keys(MARKET_IDS).find(key => MARKET_IDS[key] === job.marketId);
+    if (!key) throw new Error('Market not reachable: unknown market ID');
+    const name = getMarketNameById(job.marketId);
+    log('Checking market access: ' + name);
+    try {
+        if (state.abortFlag) throw new Error('Aborted');
+        // A cached endpoint may have changed through the game UI or another refresh.
+        if (MARKET_SERVER_IDS[key]) await stepSetEndpoint(MARKET_SERVER_IDS[key], true);
+        await readJobMarket(job.marketId, 'get.options');
+        log('Market access confirmed: ' + name, 'success');
+    } catch (error) {
+        state._lastEndpointServerId = null;
+        if (state.abortFlag || error.message === 'Aborted') throw new Error('Aborted');
+        log('Market check failed (' + name + '): ' + error.message, 'warn');
+        throw new Error('Market not reachable (' + name + '): ' + error.message);
+    }
+}
+
+export async function stepRefreshMarketJobs(job) {
+    await stepEnsureMarket(job);
+    return await readJobMarket(job.marketId, 'get.jobs');
 }
 
 // Step: Login to server (use existing access or hack)
@@ -349,6 +374,7 @@ export async function stepTakeJob(job) {
         log('Job already taken — skipping take step');
         return;
     }
+    await stepEnsureMarket(job);
     log('Taking job: ' + jobLabel(job));
 
     var depositPaid = 0;
@@ -400,34 +426,13 @@ export async function stepTakeJob(job) {
     await delay(humanDelay());
 
     log('Refreshing market data for job conditions...');
-    sendCmd('get.jobs', { marketId: job.marketId });
-    var updatedConditions = await new Promise(function (resolve) {
-        var timer;
-        function handler(evt) {
-            if (evt.data && (evt.data.type === 'COR3_WS_MARKET' || evt.data.type === 'COR3_WS_DARK_MARKET' || evt.data.type === 'COR3_WS_SOYUZ_MARKET' || evt.data.type === 'COR3_WS_USOL_MARKET')) {
-                var md = evt.data.market;
-                if (md && md.recentJobs) {
-                    var rj = md.recentJobs.find(function (j) { return j.id === job.jobId; });
-                    if (rj) {
-                        cleanup();
-                        resolve(rj);
-                        return;
-                    }
-                }
-            }
-        }
-        function cleanup() {
-            window.removeEventListener('message', handler);
-            safeClearTimeout(timer);
-        }
-        window.addEventListener('message', handler);
-        timer = safeTimeout(function () {
-            window.removeEventListener('message', handler);
-            resolve(null);
-        }, 5000);
-    });
-
-    window.removeEventListener('message', fileHandler);
+    var updatedConditions;
+    try {
+        var market = await stepRefreshMarketJobs(job);
+        updatedConditions = market.recentJobs?.find(j => j.id === job.jobId);
+    } finally {
+        window.removeEventListener('message', fileHandler);
+    }
 
     if (capturedFileInfo) {
         job.fileInfo = capturedFileInfo;
@@ -447,14 +452,15 @@ export async function stepTakeJob(job) {
 // Step: Check job completion status
 export async function stepCheckJobComplete(marketId, jobId) {
     log('Checking job completion status');
-    sendCmd('get.jobs', { marketId: marketId });
-    await delay(1000);
+    await stepRefreshMarketJobs({ marketId });
     return true;
 }
 
 // Step: Complete job and claim reward
 export async function stepCompleteJob(job) {
     log('Completing job and claiming reward');
+
+    await stepEnsureMarket(job);
 
     var earnedCredits = 0;
     var earnedRenown = 0;
@@ -468,14 +474,6 @@ export async function stepCompleteJob(job) {
         }
     };
     window.addEventListener('message', profileHandler);
-
-    if (getMarketNameById(job.marketId) === 'D4RK') {
-        await stepSetEndpoint(DARK_MARKET_SERVER_ID);
-    } else if (getMarketNameById(job.marketId) === 'SOYUZ') {
-        await stepSetEndpoint(SOYUZ_MARKET_SERVER_ID);
-    } else if (getMarketNameById(job.marketId) === 'USOL') {
-        await stepSetEndpoint(USOL_MARKET_SERVER_ID);
-    }
 
     var completeRetries = 0;
     var MAX_COMPLETE_RETRIES = 2;
@@ -495,10 +493,7 @@ export async function stepCompleteJob(job) {
                     completeRetries++;
                     log('Market not reachable during job.complete — re-setting endpoint and retrying (' + completeRetries + '/' + MAX_COMPLETE_RETRIES + ')', 'warn');
                     await delay(1500);
-                    var marketName = getMarketNameById(job.marketId);
-                    if (marketName === 'D4RK') await stepSetEndpoint(DARK_MARKET_SERVER_ID);
-                    else if (marketName === 'SOYUZ') await stepSetEndpoint(SOYUZ_MARKET_SERVER_ID);
-                    else if (marketName === 'USOL') await stepSetEndpoint(USOL_MARKET_SERVER_ID);
+                    await stepEnsureMarket(job);
                     await delay(500);
                     continue;
                 }
@@ -571,7 +566,7 @@ export async function stepDiscoverDownloadFolder() {
             window.removeEventListener('message', handler);
             log('desktop.get.options WS command timed out after 8s', 'warn');
             resolve(null);
-        }, 8000);
+        }, 8000, true, 'desktop');
     });
 
     if (!result && window.__cor3DownloadFolderId) {

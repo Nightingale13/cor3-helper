@@ -5,6 +5,9 @@ import { updateExpeditionAlarmOptions } from './alarms.js';
 import { refreshAllTimestamps } from './timestamps.js';
 import { state } from './state.js';
 import { savePinnedState, renderPinnedTimers } from './pinned-timers.js';
+import { activeDroneMission } from '../shared/drone-history.js';
+import { currentDroneDecision } from '../shared/drone-events.js';
+import { decisionScore } from '../shared/decision-policy.js';
 
 const expeditionInfoContainer = document.getElementById('expeditionInfoContainer');
 const decisionsContainer = document.getElementById('decisionsContainer');
@@ -15,16 +18,8 @@ const getRidOfVeteransToggle = document.getElementById('getRidOfVeteransToggle')
 let modifiersEnabled = true;
 let savedLootMod = 1;
 let savedRiskMod = -5;
-
-const personalDroneSectionToggle = document.getElementById('personalDroneSectionToggle');
-const personalDroneSectionBody = document.getElementById('personalDroneSectionBody');
-const personalDroneContainer = document.getElementById('personalDroneContainer');
-
-personalDroneSectionToggle.addEventListener('click', async () => {
-    personalDroneSectionToggle.classList.toggle('open');
-    personalDroneSectionBody.classList.toggle('open');
-    personalDroneContainer.replaceChildren(_h('div', null, _h('div', {className: 'no-decisions'}, 'Soon\u2122')));
-});
+let cachedDroneDecision = null;
+let cachedDroneDecisionError = null;
 
 decisionsSectionToggle.addEventListener('click', () => {
     decisionsSectionToggle.classList.toggle('open');
@@ -49,7 +44,7 @@ export function getRiskModifier() {
 export function calcOptionScore(opt, expeditionRiskScore, veteranOverride) {
     const lootMod = veteranOverride ? 1 : getLootModifier();
     const riskMod = veteranOverride ? 10 : getRiskModifier();
-    return Math.round((opt.lootModifier * lootMod) + ((opt.riskModifier * riskMod) * (((expeditionRiskScore + Math.abs(opt.riskModifier)) / 10) || 1)));
+    return decisionScore(opt, expeditionRiskScore, { enabled: true, loot: lootMod, risk: riskMod });
 }
 
 let _cachedExpeditionsForVeteranCheck = null;
@@ -99,28 +94,29 @@ function renderExpeditionError(error) {
     return null;
 }
 
-function buildContainerItems(containerData) {
-    const frag = document.createDocumentFragment();
-    frag.appendChild(el('div', { className: 'detail-row', style: 'color:var(--accent-green);font-weight:bold;' }, 'Items Found:'));
-    for (const item of containerData) {
-        const tierColor = item.tier === 'RARE' ? 'var(--accent-blue)' : item.tier === 'EPIC' ? 'var(--accent-purple,#a855f7)' : item.tier === 'LEGENDARY' ? 'var(--accent-orange)' : 'var(--text-dim)';
-        const img = el('img', { src: item.imageUrl, style: 'width:32px;height:32px;border-radius:4px;background:rgba(255,255,255,0.05);' });
-        img.onerror = function() { this.style.display = 'none'; };
-        frag.appendChild(
-            el('div', { style: 'display:flex;align-items:center;gap:8px;padding:3px 0;' },
-                img,
-                el('div', { style: 'flex:1;min-width:0;' },
-                    el('div', { style: 'font-size:11px;font-weight:bold;color:var(--text-primary);' }, `${item.name} x${item.quantity}`),
-                    el('div', { style: `font-size:9px;color:${tierColor};` }, item.tier)
-                )
-            )
-        );
-    }
-    return frag;
-}
-
-export function renderExpeditionInfo(expeditions) {
+export function renderExpeditionInfo(expeditions, droneData, droneMissionData) {
     clearEl(expeditionInfoContainer);
+
+    const drone = activeDroneMission(droneData, droneMissionData);
+    if (drone) {
+        const card = el('div', { className: 'expedition-card', dataset: { expeditionType: 'drone' } },
+            el('div', { className: 'exp-header' },
+                el('span', { className: 'exp-title' }, '🛩️ Drone — ' + (drone.locationName || 'Expedition')),
+                el('span', { className: 'exp-status' + (['RUNNING', 'IN_PROGRESS'].includes(drone.status) ? ' running' : '') }, drone.status)),
+            el('div', { className: 'detail-row' }, el('span', { className: 'label' }, 'Drone:'), ' ' + drone.droneName),
+            el('div', { className: 'detail-row' }, el('span', { className: 'label' }, 'Mission:'), ' ' + (drone.missionName || 'Details pending')));
+        if (Number.isFinite(drone.batteryCost)) card.appendChild(el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Battery Cost:'), ' ' + drone.batteryCost));
+        if (Number.isFinite(drone.risk)) card.appendChild(el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Risk:'), ' ' + drone.risk));
+        if (drone.endTime) {
+            const timerId = 'drone_' + drone.id;
+            state.expeditionEndTimes[timerId] = drone.endTime;
+            card.appendChild(el('div', { className: 'exp-timer-row' },
+                el('span', { className: 'exp-timer', dataset: { expId: timerId } }, formatTimeRemaining(drone.endTime))));
+        }
+        expeditionInfoContainer.appendChild(card);
+    }
 
     chrome.storage.local.get('expeditionLaunchError', (result) => {
         if (result.expeditionLaunchError) {
@@ -155,55 +151,30 @@ export function renderExpeditionInfo(expeditions) {
         );
         card.appendChild(header);
 
-        const payAndOpenMsg = exp.messages && exp.messages.find(m => m.actionType === 'pay_and_open');
-        const hasContainerData = exp.containerData && Array.isArray(exp.containerData) && exp.containerData.length > 0;
+        const mercRow = el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Mercenary:'), ` 🧑 ${mercName}`
+        );
+        if (exp.specialization === "PROSPECTOR") {
+            mercRow.appendChild(el('span', { className: 'merc-elite-badge' }, 'ELITE'));
+        }
+        card.appendChild(mercRow);
+        card.appendChild(el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Total Cost:'), ` 💰 ${exp.totalCost ? exp.totalCost.toLocaleString() : '--'}`
+        ));
+        card.appendChild(el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Insurance:'), ` ${insurance}`
+        ));
+        card.appendChild(el('div', { className: 'detail-row' },
+            el('span', { className: 'label' }, 'Risk Score:'), ` ${exp.riskScore ?? '--'}`
+        ));
 
-        if (hasContainerData) {
-            card.appendChild(buildContainerItems(exp.containerData));
-        } else if (payAndOpenMsg && exp.status === 'COMPLETED' && !exp.containerOpenedAt) {
-            const ad = payAndOpenMsg.actionData || {};
-            const row = el('div', { style: 'display:flex;align-items:center;gap:10px;' },
-                el('div', { style: 'flex:1;' },
-                    el('div', { className: 'detail-row' },
-                        el('span', { className: 'label' }, 'Open Cost:'), ` 💰 ${(ad.cost || 0).toLocaleString()}`
-                    ),
-                    el('div', { className: 'detail-row' },
-                        el('span', { className: 'label' }, 'Items Inside:'), ` 📦 ${ad.itemCount || '?'}`
-                    )
-                )
-            );
-            if (ad.containerImageUrl) {
-                const cImg = el('img', { src: ad.containerImageUrl, style: 'width:48px;height:48px;border-radius:6px;background:rgba(255,255,255,0.05);' });
-                cImg.onerror = function() { this.style.display = 'none'; };
-                row.appendChild(cImg);
-            }
-            card.appendChild(row);
-        } else {
-            const mercRow = el('div', { className: 'detail-row' },
-                el('span', { className: 'label' }, 'Mercenary:'), ` 🧑 ${mercName}`
-            );
-            if (exp.specialization === "PROSPECTOR") {
-                mercRow.appendChild(el('span', { className: 'merc-elite-badge' }, 'ELITE'));
-            }
-            card.appendChild(mercRow);
-            card.appendChild(el('div', { className: 'detail-row' },
-                el('span', { className: 'label' }, 'Total Cost:'), ` 💰 ${exp.totalCost ? exp.totalCost.toLocaleString() : '--'}`
+        if (exp.endTime) {
+            const timerSpan = el('span', { className: 'exp-timer', dataset: { expId: exp.id } }, formatTimeRemaining(exp.endTime));
+            const pinBtn = el('button', { className: 'refresh-btn-small pin-btn pin-exp-btn', dataset: { expId: exp.id }, title: 'Pin Expedition Timer' }, '📌');
+            card.appendChild(el('div', { className: 'exp-timer-row' },
+                el('span', { style: 'font-size:11px;color:var(--accent-orange);' }, '⏳ ', timerSpan),
+                pinBtn
             ));
-            card.appendChild(el('div', { className: 'detail-row' },
-                el('span', { className: 'label' }, 'Insurance:'), ` ${insurance}`
-            ));
-            card.appendChild(el('div', { className: 'detail-row' },
-                el('span', { className: 'label' }, 'Risk Score:'), ` ${exp.riskScore ?? '--'}`
-            ));
-
-            if (exp.endTime) {
-                const timerSpan = el('span', { className: 'exp-timer', dataset: { expId: exp.id } }, formatTimeRemaining(exp.endTime));
-                const pinBtn = el('button', { className: 'refresh-btn-small pin-btn pin-exp-btn', dataset: { expId: exp.id }, title: 'Pin Expedition Timer' }, '📌');
-                card.appendChild(el('div', { className: 'exp-timer-row' },
-                    el('span', { style: 'font-size:11px;color:var(--accent-orange);' }, '⏳ ', timerSpan),
-                    pinBtn
-                ));
-            }
         }
 
         expeditionInfoContainer.appendChild(card);
@@ -226,6 +197,8 @@ export function renderExpeditionInfo(expeditions) {
 export function renderDecisions(decisions) {
     clearEl(decisionsContainer);
     const countEl = document.getElementById('decisionsCount');
+    decisions = [...(decisions || []).filter(decision => decision._kind !== 'drone'), ...(cachedDroneDecision ? [cachedDroneDecision] : [])];
+    if (cachedDroneDecisionError) decisionsContainer.appendChild(el('div', { className: 'warning-banner' }, cachedDroneDecisionError));
 
     if (!decisions || decisions.length === 0) {
         decisionsContainer.appendChild(noDataMsg('No pending decisions found.'));
@@ -254,7 +227,7 @@ export function renderDecisions(decisions) {
         }
 
         const mercInfo = el('div', { className: 'merc-info' },
-            `🧑 ${d.mercenaryCallsign} — ${d.locationName} / ${d.zoneName} `, statusTag
+            `${d._kind === 'drone' ? '🛩️ Drone: ' : '🧑 '}${d.mercenaryCallsign} — ${d.locationName} / ${d.zoneName} `, statusTag
         );
         card.appendChild(mercInfo);
         card.appendChild(el('div', { className: 'msg-content' }, d.content));
@@ -287,7 +260,7 @@ export function renderDecisions(decisions) {
                 const isDefault = (d.isAutoResolved && d.selectedOption === opt.id);
                 const riskSign = opt.riskModifier > 0 ? '+' : '';
                 const lootSign = opt.lootModifier > 0 ? '+' : '';
-                const vetOverride = isVeteranExpedition(d.expeditionId);
+                const vetOverride = d._kind !== 'drone' && isVeteranExpedition(d.expeditionId);
                 const score = calcOptionScore(opt, d.isResolved ? baseRisk : d.riskScore, vetOverride);
                 const selectedLabel = isSelected ? (isDefault ? " (⏳Expired⏳)" : ' ✓') : '';
 
@@ -303,7 +276,12 @@ export function renderDecisions(decisions) {
                     )
                 );
 
-                if (canClick) {
+                if (opt.unavailable) {
+                    optRow.classList.remove('clickable');
+                    optRow.title = 'Requires a module. Choose this option in game.';
+                    optRow.style.opacity = '0.5';
+                }
+                if (canClick && !opt.unavailable) {
                     optRow.addEventListener('click', async () => {
                         const optId = optRow.dataset.optId;
                         const expId = optRow.dataset.expId;
@@ -332,7 +310,7 @@ export function renderDecisions(decisions) {
                             const tab = await getCor3Tab();
                             if (tab) {
                                 await chrome.tabs.sendMessage(tab.id, {
-                                    action: 'respondDecision',
+                                    action: d._kind === 'drone' ? 'respondDroneDecision' : 'respondDecision',
                                     expeditionId: expId,
                                     messageId: msgId,
                                     selectedOption: optId
@@ -354,6 +332,8 @@ export function renderDecisions(decisions) {
 const autoChosenDecisions = new Set();
 var counter = 0;
 export async function checkAutoChoose(decisions) {
+    const saved = await chrome.storage.sync.get(['helperMode', 'decisionModifiers']);
+    if (state.isHelper || saved.helperMode || saved.decisionModifiers?.autoChoose === false) return;
     const autoChoose = document.getElementById('autoChooseCheckbox');
     if (!autoChoose || !autoChoose.checked) return;
     if (!decisions || decisions.length === 0) return;
@@ -369,7 +349,7 @@ export async function checkAutoChoose(decisions) {
         const noWait = noWaitCb && noWaitCb.checked;
         if (!noWait && remaining > 60000) continue;
 
-        const vetOverride = isVeteranExpedition(d.expeditionId);
+                const vetOverride = d._kind !== 'drone' && isVeteranExpedition(d.expeditionId);
         let bestOpt = null;
         let bestScore = -Infinity;
         for (const opt of d.decisionOptions) {
@@ -398,11 +378,17 @@ export async function checkAutoChoose(decisions) {
 }
 
 export async function loadExpeditions() {
-    const { expeditionsData, expeditionDecisions } = await chrome.storage.local.get(['expeditionsData', 'expeditionDecisions']);
-    renderExpeditionInfo(expeditionsData || []);
+    const { expeditionsData, expeditionDecisions, droneData, droneMissionData, droneEvents, droneRetiredEvents, droneMissionEventsUpdatedAt, droneDecisionError } = await chrome.storage.local.get([
+        'expeditionsData', 'expeditionDecisions', 'droneData', 'droneMissionData', 'droneEvents', 'droneRetiredEvents', 'droneMissionEventsUpdatedAt', 'droneDecisionError'
+    ]);
+    cachedDroneDecision = currentDroneDecision(droneData, droneMissionData, droneEvents, droneRetiredEvents, droneMissionEventsUpdatedAt);
+    cachedDroneDecisionError = droneDecisionError;
+    renderExpeditionInfo(expeditionsData || [], droneData, droneMissionData);
     renderDecisions(expeditionDecisions || []);
     updateExpeditionAlarmOptions(expeditionsData || []);
     refreshAllTimestamps();
+
+}
 
     setInterval(() => {
         chrome.storage.local.get('expeditionLaunchError', (result) => {
@@ -419,14 +405,16 @@ export async function loadExpeditions() {
             }
         });
     }, 30000);
-}
 
 export async function requestExpeditions() {
     expeditionInfoContainer.replaceChildren(noDataMsg('Loading expedition data...'));
     await chrome.storage.local.remove(['expeditionsData', 'expeditionDecisions']);
     try {
         const tab = await getCor3Tab();
-        if (tab) await chrome.tabs.sendMessage(tab.id, { action: "requestExpeditions" });
+        if (tab) {
+            await chrome.tabs.sendMessage(tab.id, { action: "requestExpeditions" });
+            await chrome.tabs.sendMessage(tab.id, { action: "requestDroneOptions" });
+        }
     } catch (e) { /* not reachable */ }
     let loaded = false;
     const poll = setInterval(async () => {
@@ -442,8 +430,7 @@ export async function requestExpeditions() {
         clearInterval(poll);
         if (!loaded) {
             loaded = true;
-            expeditionInfoContainer.replaceChildren(noDataMsg('No active expeditions.'));
-            decisionsContainer.replaceChildren(noDataMsg('No pending decisions found.'));
+            loadExpeditions();
         }
     }, 5000);
 }

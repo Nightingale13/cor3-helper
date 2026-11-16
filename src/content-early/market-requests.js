@@ -3,13 +3,22 @@ import {
     HOME_MARKET_ID, DARK_MARKET_ID, DARK_SERVER_ID,
     SOYUZ_MARKET_ID, SOYUZ_SERVER_ID,
     USOL_MARKET_ID, USOL_SERVER_ID,
-    getMarketRefreshAbortId
+    getMarketRefreshAbortId, bumpMarketRefreshAbortId, getMarketAccessRevision
 } from './state.js';
-import { wsSend } from './ws-send.js';
+import { wsSend as sendMarketMessage } from './ws-send.js';
+import { safeTimeout as setTimeout, safeClearTimeout as clearTimeout } from '../shared/ws-utils.js';
+import { marketRouteBlocker } from '../shared/market-reachability.js';
 
-function trackMarketRequest(marketId) {
-    window.__cor3CurrentMarketFetch = marketId;
+function wsSend(message) {
+    const generation = getMarketRefreshAbortId();
+    return sendMarketMessage(message, { cancelled: () => generation !== getMarketRefreshAbortId() });
 }
+let currentRefresh = null;
+window.__cor3StopMarketRefresh = function (requestId) {
+    if (!currentRefresh || currentRefresh.requestId !== requestId) return;
+    bumpMarketRefreshAbortId();
+    currentRefresh.finish();
+};
 
 // Helper: wait for a specific postMessage event type with timeout (MAIN world)
 export function __cor3WaitForMsg(eventType, timeoutMs) {
@@ -182,81 +191,31 @@ export function __cor3FindPathsToServer(servers, connections, targetServerId) {
     return allPaths;
 }
 
-// Find the first maintenance blocker on any path to target using map data.
-// Returns { blockerName, maintenanceEndsAt } or null.
-function __cor3FindMaintenanceBlocker(servers, connections, targetServerId) {
-    var serverLookup = {};
-    var adjacency = {};
-    var homeId = null;
-    for (var i = 0; i < servers.length; i++) {
-        var s = servers[i];
-        serverLookup[s.id] = s;
-        adjacency[s.id] = [];
-        if (s.serverTypeName === 'Home' || s.serverName === 'Home Server') homeId = s.id;
-    }
-    for (var j = 0; j < connections.length; j++) {
-        var c = connections[j];
-        if (adjacency[c.serverA] && adjacency[c.serverB]) {
-            adjacency[c.serverA].push(c.serverB);
-            adjacency[c.serverB].push(c.serverA);
-        }
-    }
-    if (!homeId) return null;
-    // Find any path (including through maintenance servers) to identify the blocker
-    var visited = {};
-    var queue = [homeId];
-    var parent = {};
-    visited[homeId] = true;
-    while (queue.length > 0) {
-        var cur = queue.shift();
-        if (cur === targetServerId) break;
-        var nbrs = adjacency[cur] || [];
-        for (var ni = 0; ni < nbrs.length; ni++) {
-            if (!visited[nbrs[ni]]) {
-                visited[nbrs[ni]] = true;
-                parent[nbrs[ni]] = cur;
-                queue.push(nbrs[ni]);
-            }
-        }
-    }
-    if (!visited[targetServerId]) return { blockerName: 'no-path', maintenanceEndsAt: null };
-    // Walk the BFS path and find first maintenance server
-    var pathIds = [];
-    var at = targetServerId;
-    while (at && at !== homeId) { pathIds.unshift(at); at = parent[at]; }
-    var now = Date.now();
-    for (var pi = 0; pi < pathIds.length; pi++) {
-        var srv = serverLookup[pathIds[pi]];
-        if (srv && srv.isInMaintenance) {
-            var rem = srv.maintenanceEndsAt ? new Date(srv.maintenanceEndsAt).getTime() - now : 0;
-            if (rem > 0) return { blockerName: srv.serverName, maintenanceEndsAt: srv.maintenanceEndsAt };
-        }
-    }
-    return null;
-}
-
 // Post an UNREACHABLE message with maintenance info fetched dynamically from network-map
 export function __cor3PostUnreachable(marketType, serverName) {
     var cfg = MARKET_CONFIG[marketType];
     var msgType = cfg ? cfg.unreachableMsg : 'COR3_WS_DARK_MARKET_UNREACHABLE';
     var targetServerId = cfg ? cfg.serverId : null;
+    const revision = getMarketAccessRevision(marketType);
+    const generation = getMarketRefreshAbortId();
     __cor3FetchMapData().then(function (mapData) {
-        var blocker = null;
-        if (mapData && targetServerId) {
-            blocker = __cor3FindMaintenanceBlocker(mapData.servers, mapData.connections, targetServerId);
-        }
+        if (revision !== getMarketAccessRevision(marketType) || generation !== getMarketRefreshAbortId()) return;
+        var blocker = mapData && targetServerId ? marketRouteBlocker(mapData.servers, mapData.connections, targetServerId) : null;
         if (blocker) {
             window.__cor3UnreachableMarkets[marketType] = {
-                blockerName: blocker.blockerName,
+                blockerName: blocker.blockerName === 'no-path' ? null : blocker.blockerName,
                 maintenanceEndsAt: blocker.maintenanceEndsAt,
                 detectedAt: Date.now()
             };
             console.log('[COR3 Helper] Cached unreachable ' + marketType + ': ' + blocker.blockerName + ' maintenance until ' + (blocker.maintenanceEndsAt || 'unknown'));
         }
+        if (!blocker) delete window.__cor3UnreachableMarkets[marketType];
         window.postMessage({
             type: msgType,
+            confirmed: !!blocker,
+            checkedAt: Date.now(),
             error: 'no-path-to-server',
-            blockerServerName: blocker ? blocker.blockerName : (serverName || null),
+            blockerServerName: blocker && blocker.blockerName !== 'no-path' ? blocker.blockerName : (serverName || null),
             maintenanceEndsAt: blocker ? blocker.maintenanceEndsAt : null
         }, '*');
     });
@@ -417,7 +376,7 @@ function __cor3MarketPathThroughRetry(marketType) {
 window.__cor3RequestMarket = function (callback) {
     var myAbortId = getMarketRefreshAbortId();
     console.log('[COR3 Helper] Requesting HOME market (batch: options+lots+jobs)');
-    trackMarketRequest(HOME_MARKET_ID);
+
     var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + HOME_MARKET_ID + '"}}]';
     var getLots = '42["event",{"event":{"name":"market","action":"get.lots"},"data":{"marketId":"' + HOME_MARKET_ID + '"}}]';
     var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + HOME_MARKET_ID + '"}}]';
@@ -459,7 +418,7 @@ window.__cor3RequestDarkMarket = function (callback) {
             error: 'no-path-to-server',
             blockerServerName: cachedUnreachable.blockerName,
             maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt,
-            cached: true
+            cached: true, checkedAt: cachedUnreachable.detectedAt
         }, '*');
         if (callback) callback();
         return true;
@@ -476,7 +435,7 @@ window.__cor3RequestDarkMarket = function (callback) {
             return;
         }
         console.log('[COR3 Helper] Requesting D4RK market (batch: options+lots+jobs)');
-        trackMarketRequest(DARK_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + DARK_MARKET_ID + '"}}]';
         var getLots = '42["event",{"event":{"name":"market","action":"get.lots"},"data":{"marketId":"' + DARK_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + DARK_MARKET_ID + '"}}]';
@@ -568,7 +527,7 @@ window.__cor3RequestSoyuzMarket = function (callback) {
             error: 'no-path-to-server',
             blockerServerName: cachedUnreachable.blockerName,
             maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt,
-            cached: true
+            cached: true, checkedAt: cachedUnreachable.detectedAt
         }, '*');
         if (callback) callback();
         return true;
@@ -585,7 +544,7 @@ window.__cor3RequestSoyuzMarket = function (callback) {
             return;
         }
         console.log('[COR3 Helper] Requesting SOYUZ market (batch: options+lots+jobs)');
-        trackMarketRequest(SOYUZ_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + SOYUZ_MARKET_ID + '"}}]';
         var getLots = '42["event",{"event":{"name":"market","action":"get.lots"},"data":{"marketId":"' + SOYUZ_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + SOYUZ_MARKET_ID + '"}}]';
@@ -672,7 +631,7 @@ window.__cor3RequestUsolMarket = function (callback) {
             error: 'no-path-to-server',
             blockerServerName: cachedUnreachable.blockerName,
             maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt,
-            cached: true
+            cached: true, checkedAt: cachedUnreachable.detectedAt
         }, '*');
         if (callback) callback();
         return true;
@@ -689,7 +648,7 @@ window.__cor3RequestUsolMarket = function (callback) {
             return;
         }
         console.log('[COR3 Helper] Requesting USOL market (batch: options+lots+jobs)');
-        trackMarketRequest(USOL_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + USOL_MARKET_ID + '"}}]';
         var getLots = '42["event",{"event":{"name":"market","action":"get.lots"},"data":{"marketId":"' + USOL_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + USOL_MARKET_ID + '"}}]';
@@ -773,17 +732,26 @@ window.__cor3RefreshAllMarketsSequential = function (callback, opts) {
     var skipLots = !!opts.skipLots;
     var idx = 0;
     var myAbortId = getMarketRefreshAbortId();
+    const refresh = { requestId: opts.requestId, done: false, finish };
+    currentRefresh = refresh;
+    function finish() {
+        if (refresh.done) return;
+        refresh.done = true;
+        if (currentRefresh === refresh) currentRefresh = null;
+        window.postMessage({ type: 'COR3_ALL_MARKETS_REFRESHED', requestId: opts.requestId }, '*');
+        if (callback) callback();
+    }
 
     function refreshNext() {
+        if (refresh.done) return;
         if (myAbortId !== getMarketRefreshAbortId()) {
             console.log('[COR3 Helper] Sequential refresh aborted (token-expired)');
-            window.postMessage({ type: 'COR3_ALL_MARKETS_REFRESHED' }, '*');
+            finish();
             return;
         }
         if (idx >= order.length) {
             console.log('[COR3 Helper] Sequential refresh: all markets done');
-            window.postMessage({ type: 'COR3_ALL_MARKETS_REFRESHED' }, '*');
-            if (callback) callback();
+            finish();
             return;
         }
         var market = order[idx];
@@ -824,7 +792,7 @@ window.__cor3RefreshAllMarketsSequential = function (callback, opts) {
 window.__cor3RequestMarketJobsOnly = function (callback) {
     var myAbortId = getMarketRefreshAbortId();
     console.log('[COR3 Helper] Requesting HOME market (batch: options+jobs, jobs-only)');
-    trackMarketRequest(HOME_MARKET_ID);
+
     var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + HOME_MARKET_ID + '"}}]';
     var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + HOME_MARKET_ID + '"}}]';
     wsSend(getOptions);
@@ -855,7 +823,7 @@ window.__cor3RequestDarkMarketJobsOnly = function (callback) {
     var cachedUnreachable = window.__cor3IsMarketUnreachable('dark');
     if (cachedUnreachable) {
         console.log('[COR3 Helper] D4RK market known unreachable (' + cachedUnreachable.blockerName + ' maintenance) — skipping jobs-only');
-        window.postMessage({ type: 'COR3_WS_DARK_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true }, '*');
+        window.postMessage({ type: 'COR3_WS_DARK_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true, checkedAt: cachedUnreachable.detectedAt }, '*');
         if (callback) callback();
         return true;
     }
@@ -868,7 +836,7 @@ window.__cor3RequestDarkMarketJobsOnly = function (callback) {
     function fetchDarkJobsBatch(cb) {
         if (myAbortId !== getMarketRefreshAbortId()) { console.log('[COR3 Helper] D4RK market jobs-only fetch aborted (token-expired)'); return; }
         console.log('[COR3 Helper] Requesting D4RK market (batch: options+jobs, jobs-only)');
-        trackMarketRequest(DARK_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + DARK_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + DARK_MARKET_ID + '"}}]';
         wsSend(getOptions);
@@ -897,7 +865,7 @@ window.__cor3RequestSoyuzMarketJobsOnly = function (callback) {
     var cachedUnreachable = window.__cor3IsMarketUnreachable('soyuz');
     if (cachedUnreachable) {
         console.log('[COR3 Helper] SOYUZ market known unreachable (' + cachedUnreachable.blockerName + ' maintenance) — skipping jobs-only');
-        window.postMessage({ type: 'COR3_WS_SOYUZ_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true }, '*');
+        window.postMessage({ type: 'COR3_WS_SOYUZ_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true, checkedAt: cachedUnreachable.detectedAt }, '*');
         if (callback) callback();
         return true;
     }
@@ -910,7 +878,7 @@ window.__cor3RequestSoyuzMarketJobsOnly = function (callback) {
     function fetchSoyuzJobsBatch(cb) {
         if (myAbortId !== getMarketRefreshAbortId()) { console.log('[COR3 Helper] SOYUZ market jobs-only fetch aborted (token-expired)'); return; }
         console.log('[COR3 Helper] Requesting SOYUZ market (batch: options+jobs, jobs-only)');
-        trackMarketRequest(SOYUZ_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + SOYUZ_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + SOYUZ_MARKET_ID + '"}}]';
         wsSend(getOptions);
@@ -939,7 +907,7 @@ window.__cor3RequestUsolMarketJobsOnly = function (callback) {
     var cachedUnreachable = window.__cor3IsMarketUnreachable('usol');
     if (cachedUnreachable) {
         console.log('[COR3 Helper] USOL market known unreachable (' + cachedUnreachable.blockerName + ' maintenance) — skipping jobs-only');
-        window.postMessage({ type: 'COR3_WS_USOL_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true }, '*');
+        window.postMessage({ type: 'COR3_WS_USOL_MARKET_UNREACHABLE', error: 'no-path-to-server', blockerServerName: cachedUnreachable.blockerName, maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt, cached: true, checkedAt: cachedUnreachable.detectedAt }, '*');
         if (callback) callback();
         return true;
     }
@@ -952,7 +920,7 @@ window.__cor3RequestUsolMarketJobsOnly = function (callback) {
     function fetchUsolJobsBatch(cb) {
         if (myAbortId !== getMarketRefreshAbortId()) { console.log('[COR3 Helper] USOL market jobs-only fetch aborted (token-expired)'); return; }
         console.log('[COR3 Helper] Requesting USOL market (batch: options+jobs, jobs-only)');
-        trackMarketRequest(USOL_MARKET_ID);
+
         var getOptions = '42["event",{"event":{"name":"market","action":"get.options"},"data":{"marketId":"' + USOL_MARKET_ID + '"}}]';
         var getJobs = '42["event",{"event":{"name":"market","action":"get.jobs"},"data":{"marketId":"' + USOL_MARKET_ID + '"}}]';
         wsSend(getOptions);

@@ -3,8 +3,11 @@ import {
     OrigWebSocket, trackedSockets, socketLastActivity,
     getActiveSocket, setActiveSocket,
     getCapturedBearerToken, setCapturedBearerToken,
-    pendingRetryOps, tokenExpiredFlag, setTokenExpiredFlag, setPendingRetryOps
+    pendingRetryOps, tokenExpiredFlag, setTokenExpiredFlag, setPendingRetryOps, bumpMarketRefreshAbortId
 } from './state.js';
+import { trackRequest, forgetSocket, parseCommand } from './request-tracker.js';
+import { noteManualCommand } from './interaction-guard.js';
+import { discardDisconnectedWrites } from './ws-send.js';
 
 export function decodeBinaryMsg(raw, cb) {
     var codec = window.__cor3MsgpackCodec;
@@ -49,8 +52,15 @@ export function installWebSocketProxy(handleWsMessage) {
                 // Intercept ALL send() calls on this socket to log user-triggered messages
                 var origSend = ws.send.bind(ws);
                 ws.send = function (data) {
+                    const fromHelper = !!ws.__cor3HelperSending;
+                    function trackManual(str) {
+                        if (fromHelper || isMinigameSocket) return;
+                        trackRequest(ws, str, 'manual');
+                        noteManualCommand(parseCommand(str));
+                    }
                     try {
                         if (typeof data === 'string') {
+                            trackManual(data);
                             if (data.indexOf('40{') === 0) {
                                 try {
                                     var connectPayload = JSON.parse(data.substring(2));
@@ -64,6 +74,7 @@ export function installWebSocketProxy(handleWsMessage) {
                         } else if (data instanceof ArrayBuffer || (typeof Uint8Array !== 'undefined' && ArrayBuffer.isView(data))) {
                             decodeBinaryMsg(data, function (str) {
                                 if (str) {
+                                    trackManual(str);
                                     window.postMessage({ type: 'COR3_WS_LOG', direction: 'sent', message: str }, '*');
                                     // Capture token from binary 40{...} connect messages
                                     if (str.indexOf('40{') === 0) {
@@ -80,6 +91,7 @@ export function installWebSocketProxy(handleWsMessage) {
                         } else if (data instanceof Blob) {
                             decodeBinaryMsg(data, function (str) {
                                 if (str) {
+                                    trackManual(str);
                                     window.postMessage({ type: 'COR3_WS_LOG', direction: 'sent', message: str }, '*');
                                     // Capture token from binary 40{...} connect messages
                                     if (str.indexOf('40{') === 0) {
@@ -137,11 +149,18 @@ export function installWebSocketProxy(handleWsMessage) {
 
                 // Clean up closed sockets
                 ws.addEventListener('close', function () {
+                    forgetSocket(ws);
                     console.log('[COR3 Helper] WS closed');
                     const idx = trackedSockets.indexOf(ws);
                     if (idx !== -1) trackedSockets.splice(idx, 1);
                     socketLastActivity.delete(ws);
                     if (getActiveSocket() === ws) setActiveSocket(null);
+                    if (!isMinigameSocket && !trackedSockets.some(socket => socket.readyState === OrigWebSocket.OPEN)) {
+                        bumpMarketRefreshAbortId();
+                        discardDisconnectedWrites();
+                        window.__cor3ResetInitialFetch?.();
+                        window.postMessage({ type: 'COR3_CONNECTION_LOST' }, '*');
+                    }
                     // Notify ICE Wall solver when its minigame WS closes
                     if (ws.__cor3IsMinigame && ws.__cor3Url && ws.__cor3Url.indexOf('ice-wall-break') !== -1) {
                         window.postMessage({ type: 'COR3_ICE_WALL_GAME_ENDED' }, '*');

@@ -1,6 +1,8 @@
 import { getCor3Tab, bgAutoJobLog } from './helpers.js';
 import { MARKET_IDS, LOG_JOB_TYPES } from '../shared/server-constants.js';
 import { FALLBACK_PATH_MAP, FALLBACK_SERVER_PRIORITY } from '../shared/server-map.js';
+import { ensureGameConnection, sendGameMessage } from '../shared/game-connection.js';
+import { isMinigameLocked } from '../shared/job-retry.js';
 
 const SUPPORTED_JOB_TYPES_BG = [
     'File Decryption', 'IP Injection', 'Data Download', 'Log Deletion',
@@ -37,7 +39,8 @@ export function collectJobsBg(marketData, darkMarketData, completedResults, serv
     const skipIds = new Set();
     if (completedResults && completedResults.length > 0) {
         for (const cr of completedResults) {
-            if (cr.status === 'failed' || cr.status === 'bugged' || cr.status === 'skipped') {
+            if (isMinigameLocked(cr, now) || cr.status === 'failed' || cr.status === 'bugged' ||
+                (cr.status === 'skipped' && !cr.lockExpiresAt)) {
                 skipIds.add(cr.jobId);
             }
         }
@@ -199,20 +202,19 @@ export async function scheduleAutoFinishAllBg() {
                     scheduledReason = `maintenance ended (${sr.serverName || 'unknown server'}) — rechecking`;
                 }
             }
+            if (isMinigameLocked(sr, now)) {
+                hasEndTimeInfo = true;
+                const diff = new Date(sr.lockExpiresAt).getTime() - now;
+                if (diff < minWaitMs) {
+                    minWaitMs = diff;
+                    scheduledReason = `minigame lock expires (${sr.name || sr.serverName || 'unknown'})`;
+                }
+            }
         }
         if (!hasEndTimeInfo && minWaitMs === Infinity) {
             minWaitMs = 10 * 60 * 1000;
             scheduledReason = 'maintenance fallback (no end time known)';
             bgAutoJobLog(`🔄 Auto Finish All: ${skippedFromResults.length} job(s) skipped (maintenance) with unknown end time — waiting 10m`, 'warn');
-        }
-        for (const sr of skippedFromResults) {
-            if (sr.lockExpiresAt) {
-                const diff = new Date(sr.lockExpiresAt).getTime() - now;
-                if (diff > 0 && diff < minWaitMs) {
-                    minWaitMs = diff;
-                    scheduledReason = `minigame lock expires (${sr.name || sr.serverName || 'unknown'})`;
-                }
-            }
         }
     }
 
@@ -258,7 +260,7 @@ export async function runAutoFinishAllBg() {
 
     const { autoJobsCompletedResults: crPre } = await chrome.storage.local.get('autoJobsCompletedResults');
     if (Array.isArray(crPre) && crPre.some(cr => cr.status === 'skipped')) {
-        const cleared = crPre.filter(cr => cr.status !== 'skipped');
+        const cleared = crPre.filter(cr => cr.status !== 'skipped' || isMinigameLocked(cr));
         await chrome.storage.local.set({ autoJobsCompletedResults: cleared });
     }
 
@@ -329,9 +331,10 @@ export async function runAutoFinishAllBg() {
                 !newJobIds.has(j.jobId) && (j.status === 'done' || j.status === 'failed' || j.status === 'skipped' || j.status === 'bugged')
             );
             const mergedTracker = [...previousJobs, ...jobsToRun];
-            await chrome.storage.local.set({ autoJobsRunning: true, autoJobsQueue: jobsToRun, autoJobsTracker: mergedTracker });
             try {
-                await chrome.tabs.sendMessage(tab.id, { action: "startAutoJobs", jobs: jobsToRun });
+                await ensureGameConnection(tab.id);
+                await chrome.storage.local.set({ autoJobsRunning: true, autoJobsQueue: jobsToRun, autoJobsTracker: mergedTracker });
+                await sendGameMessage(tab.id, { action: "startAutoJobs", jobs: jobsToRun });
             } catch (e) {
                 bgAutoJobLog('🔄 Auto Finish All: failed to start — ' + (e.message || e), 'error');
                 cor3LogError('background.js', e, { action: 'autoFinishAll-startJobs' });

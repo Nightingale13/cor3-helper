@@ -1,6 +1,8 @@
-// Expedition-related functions: request, respond, archive, mercs, launch, collect
+// Expedition-related functions: request, respond, archive, mercs, launch, mail
 import { USOL_MARKET_ID, USOL_SERVER_ID } from './state.js';
 import { wsSend, enterRooms, humanDelay, queueRetryOp } from './ws-send.js';
+import { safeTimeout as setTimeout, safeClearTimeout as clearTimeout } from '../shared/ws-utils.js';
+import { requestOptions } from './request-control.js';
 import { __cor3FetchMapData, __cor3FindPathsToServer, __cor3EnsureServerAccess, __cor3WaitForMsg, __cor3PostUnreachable } from './market-requests.js';
 
 var DEFAULT_LOCATION_NAMES = ['Skylift Remains', 'Koute Mining and Reprocessing Outpost'];
@@ -30,29 +32,13 @@ window.__cor3PatchVersion = null;
 window.__cor3DownloadFolderId = null;
 
 // Send expedition request through any open tracked socket
-// Joining the expedition room triggers the server to respond with get.active data.
-// We track whether data already arrived to avoid sending a duplicate get.active.
-window.__cor3RequestExpeditions = function () {
+// Read explicitly even when the player already owns the subscription. Waiting
+// for a room-join snapshot can hang, and passive reads must not pause with navigation.
+window.__cor3RequestExpeditions = function (requestId) {
+    const options = requestOptions(requestId);
     console.log('[COR3 Helper] Requesting expedition data');
-    var gotData = false;
-    // Listen for the response — if it arrives from room join alone, skip manual send
-    var onExpData = function (evt) {
-        if (evt.data && evt.data.type === 'COR3_WS_EXPEDITIONS') {
-            gotData = true;
-            window.removeEventListener('message', onExpData);
-        }
-    };
-    window.addEventListener('message', onExpData);
-
     enterRooms(['expeditions']).then(function () {
-        // Wait a bit — if data already arrived from room join, skip the manual send
-        setTimeout(function () {
-            window.removeEventListener('message', onExpData);
-            if (!gotData) {
-                var msg = '42["event",{"event":{"name":"expeditions","action":"get.active"}}]';
-                wsSend(msg);
-            }
-        }, 2000);
+        wsSend('42["event",{"event":{"name":"expeditions","action":"get.active"},"data":{}}]', options);
     });
     return true;
 };
@@ -220,8 +206,8 @@ window.__cor3RequestMercConfigure = function (mercenaryId, marketId, locationCon
 var usolMercAbort = null;
 
 // Request USOL mercenary data: set endpoint → get.mercenaries → (get.config if needed) → configure each merc
-window.__cor3RequestUsolMercenaries = function (callback) {
-    var cachedUnreachable = window.__cor3IsMarketUnreachable('usol');
+window.__cor3RequestUsolMercenaries = function (callback, opts = {}) {
+    var cachedUnreachable = opts.force ? null : window.__cor3IsMarketUnreachable('usol');
     if (cachedUnreachable) {
         console.log('[COR3 Helper] USOL market known unreachable (' + cachedUnreachable.blockerName + ' maintenance) — skipping merc fetch');
         window.postMessage({
@@ -229,7 +215,7 @@ window.__cor3RequestUsolMercenaries = function (callback) {
             error: 'no-path-to-server',
             blockerServerName: cachedUnreachable.blockerName,
             maintenanceEndsAt: cachedUnreachable.maintenanceEndsAt,
-            cached: true
+            cached: true, checkedAt: cachedUnreachable.detectedAt
         }, '*');
         if (callback) callback();
         return true;
@@ -472,7 +458,18 @@ window.__cor3RequestUsolMercenaries = function (callback) {
 
 // Configure and launch expedition with mercenary
 // For non-HOME markets, set.endpoint to the market server first
-window.__cor3LaunchExpedition = function (configData) {
+let lastLaunchCreditReserve = false;
+window.__cor3LaunchExpedition = function (configData, requestId, keepCreditReserve) {
+    // Legacy location/rate-limit retries omit the preference. Retain the guard
+    // from the original launch rather than bypassing it on those retries.
+    if (typeof keepCreditReserve === 'boolean') lastLaunchCreditReserve = keepCreditReserve;
+    keepCreditReserve = lastLaunchCreditReserve;
+    const options = requestOptions(requestId);
+    if (!requestId && keepCreditReserve) options.onReject = error => {
+        window.postMessage({ type: error.code === 'insufficient_credits'
+            ? 'COR3_WS_INSUFFICIENT_CREDITS' : 'COR3_WS_EXPEDITION_LAUNCH_ERROR',
+            error: error.message }, '*');
+    };
     console.log('[COR3 Helper] Launching expedition with config:', configData);
     var marketId = configData.marketId;
     var needsEndpoint = marketId && marketId !== '019d3ea4-85bd-7389-904d-8f7c85841134'; // not HOME
@@ -480,29 +477,61 @@ window.__cor3LaunchExpedition = function (configData) {
     if (marketId === USOL_MARKET_ID) serverId = USOL_SERVER_ID;
 
     function doConfigureAndLaunch() {
+        if (options.cancelled?.()) return;
         var configureMsg = '42["event",{"event":{"name":"expeditions","action":"configure"},"data":' + JSON.stringify(configData) + '}]';
-        wsSend(configureMsg);
-        // After configure, launch after a delay (launch needs same data as configure)
-        setTimeout(function () {
+        function launch() { setTimeout(function () {
             var launchMsg = '42["event",{"event":{"name":"expeditions","action":"launch"},"data":' + JSON.stringify(configData) + '}]';
-            wsSend(launchMsg);
+            wsSend(launchMsg, options);
             console.log('[COR3 Helper] Expedition launch sent');
-        }, humanDelay() + 500);
+        }, humanDelay() + 500); }
+        if (!keepCreditReserve) {
+            wsSend(configureMsg, options);
+            launch();
+            return;
+        }
+        // Use the live quote, including insurance, and a fresh balance from the
+        // same market. Missing or ambiguous replies must never allow a launch.
+        const invalidBudget = () => options.onReject?.({ code: 'game_reply_timeout',
+            message: 'Could not confirm the expedition cost and credit reserve. Retrying automatically.' });
+        wsSend(configureMsg, { ...options, onResponse(quote, request) {
+            if (options.cancelled?.()) return;
+            if (request.ambiguous || quote.error || !Number.isFinite(quote.data?.totalCost) || quote.data.totalCost < 0) {
+                invalidBudget(); return;
+            }
+            const requiredCredits = quote.data.totalCost + 2000;
+            const balanceMsg = '42' + JSON.stringify(['event', {
+                event: { name: 'market', action: 'get.options' }, data: { marketId }
+            }]);
+            wsSend(balanceMsg, { ...options, onResponse(balance, balanceRequest) {
+                if (options.cancelled?.()) return;
+                if (balanceRequest.ambiguous || balance.error || !Number.isFinite(balance.data?.userCredits)) {
+                    invalidBudget(); return;
+                }
+                if (balance.data.userCredits < requiredCredits) {
+                    options.onReject?.({ code: 'insufficient_credits', requiredCredits,
+                        message: 'Waiting for enough credits to keep 2,000 after the expedition cost.' });
+                    return;
+                }
+                launch();
+            } });
+        } });
     }
 
     if (needsEndpoint && serverId) {
         console.log('[COR3 Helper] Setting endpoint to market server before launch:', serverId);
         var setEp = '42["event",{"event":{"name":"network-map","action":"set.endpoint"},"data":{"serverId":"' + serverId + '"}}]';
-        wsSend(setEp);
+        wsSend(setEp, options);
         var epHandled = false;
         function onEpResult(evt) {
             if (epHandled) return;
             if (evt.data && evt.data.type === 'COR3_WS_ENDPOINT_RESULT') {
+                if (evt.data.serverId && evt.data.serverId !== serverId) return;
                 epHandled = true;
                 window.removeEventListener('message', onEpResult);
                 clearTimeout(epTimeout);
                 if (evt.data.success === false) {
                     console.log('[COR3 Helper] Endpoint unreachable for launch, aborting');
+                    options.onReject?.(evt.data.error || { message: 'The expedition market is unavailable.' });
                     return;
                 }
                 setTimeout(doConfigureAndLaunch, humanDelay());
@@ -513,8 +542,8 @@ window.__cor3LaunchExpedition = function (configData) {
             if (!epHandled) {
                 epHandled = true;
                 window.removeEventListener('message', onEpResult);
-                console.log('[COR3 Helper] Endpoint timeout for launch, proceeding anyway');
-                doConfigureAndLaunch();
+                console.log('[COR3 Helper] Endpoint not confirmed; deferring launch');
+                options.onReject?.({ code: 'game_reply_timeout', message: 'Timed out waiting for COR3_WS_ENDPOINT_RESULT.', replyType: 'COR3_WS_ENDPOINT_RESULT' });
             }
         }, 8000);
     } else {
@@ -523,18 +552,29 @@ window.__cor3LaunchExpedition = function (configData) {
     return true;
 };
 
-// Open reward container for a completed expedition
-window.__cor3OpenContainer = function (expeditionId) {
-    console.log('[COR3 Helper] Opening container for expedition:', expeditionId);
-    var msg = '42["event",{"event":{"name":"expeditions","action":"open.container"},"data":{"expeditionId":"' + expeditionId + '"}}]';
-    wsSend(msg);
+// The game retains this action name for paying and sending rewards to mail.
+window.__cor3PayExpeditionToMail = function (expeditionId, requestId) {
+    if (typeof expeditionId !== 'string' || !expeditionId) return false;
+    wsSend('42' + JSON.stringify(['event', {
+        event: { name: 'expeditions', action: 'open.container' },
+        data: { expeditionId: expeditionId }
+    }]), requestOptions(requestId));
     return true;
 };
 
-// Collect all contents from an opened container
-window.__cor3CollectAll = function (expeditionId) {
-    console.log('[COR3 Helper] Collecting all from expedition:', expeditionId);
-    var msg = '42["event",{"event":{"name":"expeditions","action":"collect.all"},"data":{"expeditionId":"' + expeditionId + '"}}]';
-    wsSend(msg);
+// Refresh mailbox state. Joining rooms follows the same protocol as stash.
+window.__cor3RequestMail = function (requestId) {
+    const options = requestOptions(requestId);
+    enterRooms(['mail']).then(function () {
+        wsSend('42["event",{"event":{"name":"mail","action":"get.state"},"data":{}}]', options);
+    });
+    return true;
+};
+
+window.__cor3ClaimMail = function (messageId, requestId) {
+    if (typeof messageId !== 'string' || !messageId) return false;
+    wsSend('42' + JSON.stringify(['event', {
+        event: { name: 'mail', action: 'claim.all' }, data: { messageId: messageId }
+    }]), requestOptions(requestId));
     return true;
 };

@@ -2,6 +2,7 @@ import { _h, _noData, _clearEl, _safeSetHtml } from './dom-helpers.js';
 import { getCor3Tab } from './utils.js';
 import { refreshAllTimestamps } from './timestamps.js';
 import { state } from './state.js';
+import { itemTierClass, itemTierLabel } from '../shared/item-tier.js';
 
 const inventoryContainer = document.getElementById('inventoryContainer');
 const inventorySectionToggle = document.getElementById('inventorySectionToggle');
@@ -206,10 +207,10 @@ function renderInventory(data) {
     const totalValueEl = document.getElementById('totalValue');
     if (totalValueEl) totalValueEl.textContent = totalSellValue > 0 ? `(💰 ${totalSellValue.toLocaleString()})` : '';
 
-    const RARITY_ORDER = { legendary: 0, quest: 1, epic: 2, rare: 3, common: 4 };
+    const RARITY_ORDER = { legendary: 0, quest: 1, epic: 2, 'super-rare': 3, rare: 4, common: 5 };
     const sortedItems = [...data.items].sort((a, b) => {
-        const ra = RARITY_ORDER[(a.tier || 'common').toLowerCase()] ?? 5;
-        const rb = RARITY_ORDER[(b.tier || 'common').toLowerCase()] ?? 5;
+        const ra = RARITY_ORDER[itemTierClass(a.tier)] ?? 6;
+        const rb = RARITY_ORDER[itemTierClass(b.tier)] ?? 6;
         if (ra !== rb) return ra - rb;
         const pa = (a.canSell && a.sellPrice) ? a.sellPrice : 0;
         const pb = (b.canSell && b.sellPrice) ? b.sellPrice : 0;
@@ -219,12 +220,12 @@ function renderInventory(data) {
     var invItemMap = [];
     for (const item of sortedItems) {
         const card = document.createElement('div');
-        const tierClass = 'tier-' + (item.tier || 'common').toLowerCase();
+        const tierClass = 'tier-' + itemTierClass(item.tier);
         card.className = 'item-card ' + tierClass;
 
-        const tierTagClass = 'tier-tag tier-tag-' + (item.tier || 'common').toLowerCase();
+        const tierTagClass = 'tier-tag tier-tag-' + itemTierClass(item.tier);
 
-        const badgesEl = _h('div', {className: 'item-badges'}, _h('span', {className: tierTagClass}, item.tier || 'COMMON'));
+        const badgesEl = _h('div', {className: 'item-badges'}, _h('span', {className: tierTagClass}, itemTierLabel(item.tier)));
         if (item.canCraft) badgesEl.appendChild(_h('span', {className: 'badge badge-craft'}, 'CRAFT'));
         if (item.canUse) badgesEl.appendChild(_h('span', {className: 'badge badge-use'}, 'USE'));
 
@@ -309,7 +310,7 @@ function showInventoryInfoPopup(item) {
     }
 
     h += '<div class="info-specs">';
-    if (item.tier) h += '<div class="info-spec-item"><div class="info-spec-label">Rarity</div><div class="info-spec-val">' + item.tier + '</div></div>';
+    if (item.tier) h += '<div class="info-spec-item"><div class="info-spec-label">Rarity</div><div class="info-spec-val">' + itemTierLabel(item.tier) + '</div></div>';
     if (item.sellPrice) h += '<div class="info-spec-item"><div class="info-spec-label">Sell Price</div><div class="info-spec-val">' + item.sellPrice.toLocaleString() + '</div></div>';
     if (item.canCraft) h += '<div class="info-spec-item"><div class="info-spec-label">Craftable</div><div class="info-spec-val">Yes</div></div>';
     if (item.canUse) h += '<div class="info-spec-item"><div class="info-spec-label">Usable</div><div class="info-spec-val">Yes</div></div>';

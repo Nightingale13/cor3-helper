@@ -48,7 +48,7 @@ export function formatMinigameLockError(lockData) {
     var expiresAt = lockData && lockData.lockExpiresAt;
     if (!expiresAt) return null;
     var remaining = new Date(expiresAt).getTime() - Date.now();
-    if (remaining <= 0) return null;
+    if (!Number.isFinite(remaining) || remaining <= 0) return null;
     var mins = Math.ceil(remaining / 60000);
     return { message: 'Minigame locked (~' + mins + 'm remaining)', lockExpiresAt: expiresAt, remainingMs: remaining };
 }
@@ -189,15 +189,7 @@ export function waitForIceWallStuckClear(logFn, maxWaitMs) {
     });
 }
 
-export function closeAppWindows(count) {
-    count = count || 1;
-    for (var i = 0; i < count; i++) {
-        (function (idx) {
-            setTimeout(function () {
-                var closeBtn = document.querySelector('[data-component-name="ApplicationCloseButton"]') ||
-                    document.querySelector('[data-sentry-component="ApplicationCloseButton"]');
-                if (closeBtn) closeBtn.click();
-            }, idx * 500);
-        })(i);
-    }
+export function closeAppWindows(count, owner) {
+    // A caller without proof of ownership must never close game windows.
+    return owner ? owner.close(count || 1) : Promise.resolve();
 }

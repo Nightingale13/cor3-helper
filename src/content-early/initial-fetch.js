@@ -1,87 +1,58 @@
-// Initial data fetch orchestration on page load / reconnect
-import { humanDelay } from './ws-send.js';
-
-// Auto-fetch all data on page load (called when WS opens)
-var initialFetchDone = false;
-window.__cor3ResetInitialFetch = function () {
-    initialFetchDone = false;
-    console.log('[COR3 Helper] Reset initial fetch flag for reconnect');
-};
-// Flag: initial merc fetch complete (markets + mercs all done)
+// Initial data fetch orchestration on page load / reconnect.
+let initialFetchStarted = false;
+let generation = 0;
 window.__cor3InitialMercsFetchDone = false;
+window.__cor3InitialFetchInProgress = true;
 
-window.__cor3InitialFetch = function () {
-    if (initialFetchDone) return;
-    initialFetchDone = true;
+window.__cor3ResetInitialFetch = function () {
+    generation++;
+    initialFetchStarted = false;
     window.__cor3InitialMercsFetchDone = false;
     window.__cor3InitialFetchInProgress = true;
-    console.log('[COR3 Helper] Running initial data fetch (page load)');
+};
 
-    // Trigger daily ops fetch via content script
+window.__cor3InitialFetch = async function () {
+    if (initialFetchStarted) return;
+    initialFetchStarted = true;
+    const current = ++generation;
+    const alive = () => current === generation;
+    window.__cor3InitialMercsFetchDone = false;
+    window.__cor3InitialFetchInProgress = true;
     window.postMessage({ type: 'COR3_FETCH_DAILY_OPS' }, '*');
-
-    // Follow Refresh All order:
-    // 1. Markets sequentially: HOME → D4RK → SOYUZ → USOL
-    // 2. Expedition data (server auto-provides via room join — no explicit request needed)
-    // 3. Stash (inventory)
-    // 4. CORE mercs → USOL mercs
-    // 5. Archived expeditions
-    // 6. Loadout
-    // 7. Updater
-    window.__cor3RequestMarket(function () {
-        console.log('[COR3 Helper] Initial: HOME done, starting D4RK');
-        window.__cor3RequestDarkMarket(function () {
-            console.log('[COR3 Helper] Initial: D4RK done, starting SOYUZ');
-            window.__cor3RequestSoyuzMarket(function () {
-                console.log('[COR3 Helper] Initial: SOYUZ done, starting USOL');
-                window.__cor3RequestUsolMarket(function () {
-                    console.log('[COR3 Helper] Initial: All markets fetched');
-                    // Expedition data already received from server room join — no request needed
-                    // Notify content script that expedition data can be rendered
-                    window.postMessage({ type: 'COR3_WS_EXPEDITIONS_READY' }, '*');
-                    // Fetch stash (inventory)
-                    setTimeout(function () {
-                        window.__cor3RequestStash();
-                    }, humanDelay());
-                    // Fetch specialists data (stash expansion timers) after stash
-                    setTimeout(function () {
-                        window.__cor3RequestSpecialists();
-                    }, humanDelay() + 500);
-                    // CORE mercs after stash
-                    setTimeout(function () {
-                        console.log('[COR3 Helper] Initial: Starting CORE mercs');
-                        window.__cor3RequestMercenaries(null, function () {
-                            window.postMessage({ type: 'COR3_CORE_MERCS_DONE' }, '*');
-                            console.log('[COR3 Helper] Initial: CORE mercs done, starting USOL mercs');
-                            // USOL mercs after CORE done
-                            setTimeout(function () {
-                                window.__cor3RequestUsolMercenaries(function () {
-                                    window.postMessage({ type: 'COR3_USOL_MERCS_DONE' }, '*');
-                                    window.__cor3InitialMercsFetchDone = true;
-                                    console.log('[COR3 Helper] Initial: All mercs done');
-                                    // Archived expeditions after mercs
-                                    setTimeout(function () {
-                                        window.__cor3RequestArchivedExpeditions();
-                                    }, humanDelay());
-                                    // Loadout after archived
-                                    setTimeout(function () {
-                                        window.__cor3RequestLoadout();
-                                    }, 2000);
-                                    // Updater
-                                    setTimeout(function () {
-                                        window.__cor3RequestUpdater();
-                                        window.__cor3InitialFetchInProgress = false;
-                                        console.log('[COR3 Helper] Initial data fetch complete');
-                                        window.postMessage({ type: 'COR3_INITIAL_FETCH_DONE' }, '*');
-                                    }, 3500);
-                                });
-                            }, humanDelay());
-                        });
-                    }, 2500);
-                });
-            });
-        });
-    });
+    try {
+        // Passive data remains available while market navigation waits for the user.
+        window.__cor3RequestExpeditions();
+        window.__cor3RequestStash();
+        window.__cor3RequestMail();
+        window.__cor3RequestSpecialists();
+        window.__cor3RequestLoadout();
+        window.__cor3RequestUpdater();
+        window.postMessage({ type: 'COR3_DRONE_COMMAND', action: 'get.options', data: {} }, '*');
+        const request = start => new Promise(resolve => start(resolve));
+        for (const fetch of [window.__cor3RequestMarket, window.__cor3RequestDarkMarket,
+            window.__cor3RequestSoyuzMarket, window.__cor3RequestUsolMarket]) {
+            if (!alive()) return;
+            await request(fetch);
+        }
+        if (!alive()) return;
+        window.postMessage({ type: 'COR3_WS_EXPEDITIONS_READY' }, '*');
+        await request(done => window.__cor3RequestMercenaries(null, done));
+        if (!alive()) return;
+        window.postMessage({ type: 'COR3_CORE_MERCS_DONE' }, '*');
+        await request(window.__cor3RequestUsolMercenaries);
+        if (!alive()) return;
+        window.__cor3InitialMercsFetchDone = true;
+        window.postMessage({ type: 'COR3_USOL_MERCS_DONE' }, '*');
+        window.__cor3RequestArchivedExpeditions();
+        window.__cor3InitialFetchInProgress = false;
+        window.postMessage({ type: 'COR3_INITIAL_FETCH_DONE' }, '*');
+    } catch (error) {
+        if (!alive()) return;
+        initialFetchStarted = false;
+        console.log('[COR3 Helper] Initial fetch interrupted; will retry:', error.message);
+        window.postMessage({ type: 'COR3_INITIAL_FETCH_RETRY' }, '*');
+        setTimeout(() => { if (alive()) window.__cor3InitialFetch(); }, 30000);
+    }
 };
 
 window.__cor3KeepAlive = function () {

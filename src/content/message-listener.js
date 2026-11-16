@@ -1,14 +1,17 @@
 // chrome.runtime.onMessage listener — handles messages from popup/background
 
-import { isContextValid, _automationEnqueue, _automationFinish, setAutomationQueue, getAutomationQueue } from './helpers.js';
+import { isContextValid, _automationEnqueue, _automationFinish, setAutomationQueue, getAutomationQueue, getAutomationActive } from './helpers.js';
+import { userIdleTimeout as setTimeout } from '../shared/ws-utils.js';
+import { isMinigameLocked } from '../shared/job-retry.js';
 import { setAlarms, resetAlarmTriggered, playAlarm, startContinuousAlarm, stopAlarm } from './alarms.js';
 import { setAutoRefreshSettings } from './auto-refresh.js';
-import { setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, setAutoJobsActive, _marketRefreshInProgress, _autoUpdateMarketsLastRefresh } from './auto-update-markets.js';
+import { requestDroneDecision } from './drone.js';
+import { checkAutoDailyHack } from './daily-hack.js';
+import { setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, setAutoJobsActive, _marketRefreshInProgress, _autoUpdateMarketsLastRefresh, queueMarketRefresh } from './auto-update-markets.js';
 import {
     injectDecryptSolver, stopDecryptSolver,
     injectIceWallSolver, stopIceWallSolver,
     injectSimpleDecryptSolver, stopSimpleDecryptSolver,
-    injectDailyHackSolver, stopDailyHackSolver,
     injectAutoJobSolver, injectAutoValuableSeller,
     ensureAntiAfkEnabled
 } from './solvers.js';
@@ -32,9 +35,35 @@ function fetchDailyRewards(token) {
     .catch(() => {});
 }
 
+let autoJobsGeneration = 0;
+let autoJobsStarted = false;
+let valuableGeneration = 0;
+let valuableStarted = false;
+
 export function setupMessageListener() {
+    window.addEventListener('message', event => {
+        if (event.source === window && event.data?.type === 'COR3_AUTOJOB_DONE') autoJobsStarted = false;
+        if (event.source === window && ['COR3_VALUABLE_DONE', 'COR3_VALUABLE_FORCE_MAINT_DONE'].includes(event.data?.type)) valuableStarted = false;
+    });
     chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-        if (request.action === "updateAlarms") {
+        if (request.action === 'cor3Ping') {
+            sendResponse({ ready: window.__cor3ContentBootstrap?.ready === true });
+        } else if (request.action === 'restoreGameConnection') {
+            if (request.initialFetchDone) {
+                window.postMessage({ type: 'COR3_USOL_MERCS_DONE' }, '*');
+                window.postMessage({ type: 'COR3_INITIAL_FETCH_DONE' }, '*');
+            }
+            sendResponse({ success: true });
+        } else if (request.action === "respondDroneDecision") {
+            requestDroneDecision({ missionId: request.expeditionId, eventId: request.messageId, optionId: request.selectedOption });
+            sendResponse({ success: true });
+        } else if (request.action === "requestDroneOptions") {
+            window.postMessage({ type: "COR3_DRONE_COMMAND", action: "get.options", data: {} }, "*");
+            sendResponse({ success: true });
+        } else if (request.action === "requestDroneArchived") {
+            window.postMessage({ type: "COR3_DRONE_COMMAND", action: "get.archived", data: { cursor: null, limit: 20 } }, "*");
+            sendResponse({ success: true });
+        } else if (request.action === "updateAlarms") {
             setAlarms(request.alarms || []);
             resetAlarmTriggered();
             sendResponse({ success: true });
@@ -79,50 +108,18 @@ export function setupMessageListener() {
         } else if (request.action === "unequipSoftware") {
             window.postMessage({ type: 'COR3_UNEQUIP_SOFTWARE', moduleConfigId: request.moduleConfigId }, '*');
             sendResponse({ success: true });
-        } else if (request.action === "requestMarket") {
-            window.postMessage({ type: 'COR3_REQUEST_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "refreshMarket") {
-            setMarketRefreshInProgress(true);
+        } else if (['requestMarket', 'refreshMarket', 'requestDarkMarket', 'refreshDarkMarket',
+            'requestSoyuzMarket', 'refreshSoyuzMarket', 'requestUsolMarket', 'refreshUsolMarket'].includes(request.action)) {
+            const market = /Dark/.test(request.action) ? 'dark' : /Soyuz/.test(request.action) ? 'soyuz' : /Usol/.test(request.action) ? 'usol' : 'home';
             setAutoUpdateMarketsLastRefresh(Date.now());
-            setTimeout(() => { setMarketRefreshInProgress(false); }, 10000);
-            window.postMessage({ type: 'COR3_REFRESH_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "requestDarkMarket") {
-            window.postMessage({ type: 'COR3_REQUEST_DARK_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "refreshDarkMarket") {
-            setMarketRefreshInProgress(true);
-            setAutoUpdateMarketsLastRefresh(Date.now());
-            setTimeout(() => { setMarketRefreshInProgress(false); }, 10000);
-            window.postMessage({ type: 'COR3_REFRESH_DARK_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "requestSoyuzMarket") {
-            window.postMessage({ type: 'COR3_REQUEST_SOYUZ_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "refreshSoyuzMarket") {
-            setMarketRefreshInProgress(true);
-            setAutoUpdateMarketsLastRefresh(Date.now());
-            setTimeout(() => { setMarketRefreshInProgress(false); }, 10000);
-            window.postMessage({ type: 'COR3_REFRESH_SOYUZ_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "requestUsolMarket") {
-            window.postMessage({ type: 'COR3_REQUEST_USOL_MARKET' }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "refreshUsolMarket") {
-            setMarketRefreshInProgress(true);
-            setAutoUpdateMarketsLastRefresh(Date.now());
-            setTimeout(() => { setMarketRefreshInProgress(false); }, 10000);
-            window.postMessage({ type: 'COR3_REFRESH_USOL_MARKET' }, '*');
-            sendResponse({ success: true });
+            const queueResult = queueMarketRefresh('market-' + market, { type: 'COR3_REFRESH_ALL_MARKETS_SEQ', order: [market] });
+            sendResponse({ success: true, queueResult });
         } else if (request.action === "refreshAllMarketsSeq") {
-            setMarketRefreshInProgress(true);
             setAutoUpdateMarketsLastRefresh(Date.now());
-            var msg = { type: 'COR3_REFRESH_ALL_MARKETS_SEQ' };
-            if (request.skipLots) msg.skipLots = true;
-            if (request.order) msg.order = request.order;
-            window.postMessage(msg, '*');
-            sendResponse({ success: true });
+            const message = { type: 'COR3_REFRESH_ALL_MARKETS_SEQ', skipLots: !!request.skipLots };
+            if (request.order) message.order = request.order;
+            const queueResult = queueMarketRefresh('manual-market-refresh', message);
+            sendResponse({ success: true, queueResult });
         } else if (request.action === "leaveStash") {
             window.postMessage({ type: 'COR3_LEAVE_STASH' }, '*');
             sendResponse({ success: true });
@@ -162,38 +159,7 @@ export function setupMessageListener() {
             }
             sendResponse({ success: true });
         } else if (request.action === "toggleDailyHackSolver") {
-            if (request.enabled) {
-                chrome.storage.local.get('bearerToken', (result) => {
-                    const token = result.bearerToken;
-                    if (!token) {
-                        ensureAntiAfkEnabled();
-                        injectDailyHackSolver();
-                        return;
-                    }
-                    fetch('https://svc-corie.cor3.gg/api/user-daily-claim', { headers: { 'Authorization': token } })
-                        .then(r => r.ok ? r.json() : null)
-                        .then(data => {
-                            if (data) {
-                                chrome.storage.local.set({ dailyOpsData: data, dailyOpsUpdatedAt: Date.now() });
-                                fetchDailyRewards(token);
-                            }
-                            if (data && data.hasClaimedToday) {
-                                console.log('[COR3 Helper] Daily already claimed — skipping solver');
-                                chrome.storage.sync.set({ autoDailyHackEnabled: false });
-                                chrome.storage.local.set({ dailyHackLog: 'Daily already claimed today — skipping automation.', dailyHackLogUpdatedAt: Date.now() });
-                                return;
-                            }
-                            ensureAntiAfkEnabled();
-                            injectDailyHackSolver();
-                        })
-                        .catch(() => {
-                            ensureAntiAfkEnabled();
-                            injectDailyHackSolver();
-                        });
-                });
-            } else {
-                stopDailyHackSolver();
-            }
+            chrome.storage.sync.set({ autoDailyHackEnabled: !!request.enabled }).then(() => checkAutoDailyHack());
             sendResponse({ success: true });
         } else if (request.action === "respondDecision") {
             window.postMessage({
@@ -210,7 +176,7 @@ export function setupMessageListener() {
             window.postMessage({ type: 'COR3_REQUEST_MERCENARIES' }, '*');
             sendResponse({ success: true });
         } else if (request.action === "requestUsolMercenaries") {
-            window.postMessage({ type: 'COR3_REQUEST_USOL_MERCENARIES' }, '*');
+            window.postMessage({ type: 'COR3_REQUEST_USOL_MERCENARIES', force: true }, '*');
             sendResponse({ success: true });
         } else if (request.action === "requestExpeditionConfig") {
             window.postMessage({ type: 'COR3_REQUEST_EXPEDITION_CONFIG', mercenaryId: request.mercenaryId }, '*');
@@ -218,12 +184,6 @@ export function setupMessageListener() {
         } else if (request.action === "launchExpedition") {
             chrome.storage.local.set({ lastExpeditionLaunchData: request.config });
             window.postMessage({ type: 'COR3_LAUNCH_EXPEDITION', config: request.config }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "openContainer") {
-            window.postMessage({ type: 'COR3_OPEN_CONTAINER', expeditionId: request.expeditionId }, '*');
-            sendResponse({ success: true });
-        } else if (request.action === "collectAll") {
-            window.postMessage({ type: 'COR3_COLLECT_ALL', expeditionId: request.expeditionId }, '*');
             sendResponse({ success: true });
         } else if (request.action === "fetchDailyOps") {
             chrome.storage.local.get('bearerToken', (result) => {
@@ -291,31 +251,52 @@ export function setupMessageListener() {
             ensureAntiAfkEnabled();
             const jobs = request.jobs;
             const settings = request.settings || {};
-            const result = _automationEnqueue('auto-jobs', () => {
+            const generation = autoJobsGeneration;
+            const result = _automationEnqueue('auto-jobs', async () => {
+                const active = getAutomationActive();
                 setAutoJobsActive(true);
-                injectAutoJobSolver();
-                setTimeout(() => {
-                    chrome.storage.local.get('autoJobsLockedJobs', (lockData) => {
-                        var lockedJobs = lockData.autoJobsLockedJobs;
-                        if (lockedJobs && lockedJobs.length > 0) {
-                            var now = Date.now();
-                            var stillLocked = lockedJobs.filter(j => j.lockExpiresAt && new Date(j.lockExpiresAt).getTime() > now);
-                            var expired = lockedJobs.length - stillLocked.length;
-                            settings.lockedJobs = stillLocked;
-                            chrome.storage.local.set({ autoJobsLockedJobs: stillLocked });
-                            if (expired > 0) console.log('[COR3 Helper] Pruned ' + expired + ' expired lock(s) from autoJobsLockedJobs');
-                            if (stillLocked.length > 0) console.log('[COR3 Helper] Passing ' + stillLocked.length + ' locked job(s) to solver');
+                try {
+                    await injectAutoJobSolver();
+                    if (generation !== autoJobsGeneration || !isContextValid()) return;
+                    const lockData = await chrome.storage.local.get(['autoJobsLockedJobs', 'autoJobsCompletedResults']);
+                    if (generation !== autoJobsGeneration) return;
+                    var lockedJobs = [...(lockData.autoJobsLockedJobs || []), ...(lockData.autoJobsCompletedResults || []), ...(settings.lockedJobs || [])];
+                    if (lockedJobs && lockedJobs.length > 0) {
+                        var now = Date.now();
+                        var locksByJob = new Map();
+                        for (const job of lockedJobs) {
+                            const previous = locksByJob.get(job.jobId);
+                            if (isMinigameLocked(job, now) && (!previous ||
+                                new Date(job.lockExpiresAt).getTime() > new Date(previous.lockExpiresAt).getTime())) {
+                                locksByJob.set(job.jobId, { jobId: job.jobId, lockExpiresAt: job.lockExpiresAt });
+                            }
                         }
-                        window.postMessage({ type: 'COR3_AUTOJOB_START', jobs: jobs, settings: settings }, '*');
-                    });
-                }, 500);
+                        var stillLocked = [...locksByJob.values()];
+                        settings.lockedJobs = stillLocked;
+                        await chrome.storage.local.set({ autoJobsLockedJobs: stillLocked });
+                    }
+                    await chrome.storage.local.set({ autoJobsRunning: true });
+                    if (generation !== autoJobsGeneration) return;
+                    autoJobsStarted = true;
+                    window.postMessage({ type: 'COR3_AUTOJOB_START', jobs: jobs, settings: settings }, '*');
+                } catch (error) {
+                    if (isContextValid()) await chrome.storage.local.set({ autoJobsRunning: false });
+                    throw error;
+                } finally {
+                    if (!autoJobsStarted && getAutomationActive() === active) {
+                        setAutoJobsActive(false);
+                        _automationFinish('auto-jobs');
+                    }
+                }
             });
-            sendResponse({ success: true, queueResult: result, queueStatus: import('./helpers.js').then(m => m._automationQueueStatus()) });
+            sendResponse({ success: true, queueResult: result });
         } else if (request.action === "stopAutoJobs") {
-            setAutoJobsActive(false);
+            autoJobsGeneration++;
             setAutomationQueue(getAutomationQueue().filter(q => q.type !== 'auto-jobs'));
             window.postMessage({ type: 'COR3_AUTOJOB_STOP' }, '*');
-            _automationFinish('auto-jobs');
+            const active = getAutomationActive();
+            if (autoJobsStarted && active?.type === 'auto-jobs') active.stopping = true;
+            else { setAutoJobsActive(false); _automationFinish('auto-jobs'); }
             sendResponse({ success: true });
         } else if (request.action === "enableHackSolvers") {
             ensureAntiAfkEnabled();
@@ -345,10 +326,8 @@ export function setupMessageListener() {
                         }
                         await new Promise(function (r) { setTimeout(r, 2000); });
                         if (dismissRefreshType) {
-                            setMarketRefreshInProgress(true);
                             setAutoUpdateMarketsLastRefresh(Date.now());
-                            setTimeout(function () { setMarketRefreshInProgress(false); }, 10000);
-                            window.postMessage({ type: dismissRefreshType }, '*');
+                            queueMarketRefresh('market-' + dismissMarketKey, { type: 'COR3_REFRESH_ALL_MARKETS_SEQ', order: [dismissMarketKey] });
                         }
                     } catch (e) {
                         console.log('[COR3 Helper] dismissFailedJobs error:', e);
@@ -363,42 +342,76 @@ export function setupMessageListener() {
             sendResponse({ success: true });
         } else if (request.action === "startValuableSearch") {
             ensureAntiAfkEnabled();
-            const result = _automationEnqueue('auto-valuable', () => {
-                injectAutoValuableSeller();
-                setTimeout(() => {
+            const generation = valuableGeneration;
+            const result = _automationEnqueue('auto-valuable', async () => {
+                const active = getAutomationActive();
+                try {
+                    await injectAutoValuableSeller();
+                    if (generation !== valuableGeneration) return;
+                    await chrome.storage.local.set({ valuableSearchRunning: true });
+                    if (generation !== valuableGeneration) return;
+                    valuableStarted = true;
                     window.postMessage({ type: 'COR3_VALUABLE_START_SEARCH' }, '*');
-                }, 500);
+                } finally {
+                    if (!valuableStarted && getAutomationActive() === active) {
+                        chrome.storage.local.set({ valuableSearchRunning: false });
+                        _automationFinish('auto-valuable');
+                    }
+                }
             });
             sendResponse({ success: true, queueResult: result });
         } else if (request.action === "startValuableSeller") {
             ensureAntiAfkEnabled();
             const selServers = request.selectedServers || [];
             const selDownloads = request.selectedDownloads || [];
-            const result = _automationEnqueue('auto-valuable', () => {
-                injectAutoValuableSeller();
-                setTimeout(() => {
+            const generation = valuableGeneration;
+            const result = _automationEnqueue('auto-valuable', async () => {
+                const active = getAutomationActive();
+                try {
+                    await injectAutoValuableSeller();
+                    if (generation !== valuableGeneration) return;
+                    await chrome.storage.local.set({ valuableSellerRunning: true });
+                    if (generation !== valuableGeneration) return;
+                    valuableStarted = true;
                     window.postMessage({
                         type: 'COR3_VALUABLE_START_SELLER',
                         selectedServers: selServers,
                         selectedDownloads: selDownloads
                     }, '*');
-                }, 500);
+                } finally {
+                    if (!valuableStarted && getAutomationActive() === active) {
+                        chrome.storage.local.set({ valuableSellerRunning: false });
+                        _automationFinish('auto-valuable');
+                    }
+                }
             });
             sendResponse({ success: true, queueResult: result });
         } else if (request.action === "stopValuable") {
-            setAutomationQueue(getAutomationQueue().filter(q => q.type !== 'auto-valuable'));
+            valuableGeneration++;
+            setAutomationQueue(getAutomationQueue().filter(q => !['auto-valuable', 'force-maintenance'].includes(q.type)));
             window.postMessage({ type: 'COR3_VALUABLE_STOP' }, '*');
-            _automationFinish('auto-valuable');
+            const active = getAutomationActive();
+            if (valuableStarted && ['auto-valuable', 'force-maintenance'].includes(active?.type)) active.stopping = true;
+            else if (active?.type === 'force-maintenance') _automationFinish('force-maintenance');
+            else _automationFinish('auto-valuable');
             sendResponse({ success: true });
         } else if (request.action === "forceMaintenanceBatch") {
-            injectAutoValuableSeller();
-            setTimeout(() => {
-                window.postMessage({
-                    type: 'COR3_VALUABLE_FORCE_MAINTENANCE_BATCH',
-                    servers: request.servers
-                }, '*');
-            }, 500);
-            sendResponse({ success: true });
+            const generation = valuableGeneration;
+            const result = _automationEnqueue('force-maintenance', async () => {
+                const active = getAutomationActive();
+                try {
+                    await injectAutoValuableSeller();
+                    if (generation !== valuableGeneration) return;
+                    valuableStarted = true;
+                    window.postMessage({
+                        type: 'COR3_VALUABLE_FORCE_MAINTENANCE_BATCH',
+                        servers: request.servers
+                    }, '*');
+                } finally {
+                    if (!valuableStarted && getAutomationActive() === active) _automationFinish('force-maintenance');
+                }
+            });
+            sendResponse({ success: true, queueResult: result });
         } else if (request.action === "startIpSearch") {
             window.postMessage({ type: 'COR3_IP_SEARCH_START' }, '*');
             sendResponse({ success: true });

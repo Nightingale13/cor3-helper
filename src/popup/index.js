@@ -6,6 +6,7 @@ import './daily-ops.js';
 import './alarms.js';
 import './dev-tcs.js';
 import './expeditions.js';
+import './drone.js';
 import './modifiers.js';
 import './pinned-timers.js';
 import './markets.js';

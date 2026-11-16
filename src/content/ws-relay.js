@@ -4,13 +4,12 @@
 import { isContextValid, _automationFinish, _broadcastQueueStatus, getAutomationActive, setAutomationActive } from './helpers.js';
 import { checkAutoChooseFromContent } from './auto-choose.js';
 import {
-    checkAutoSendOnExpeditionData, proceedWithMerc,
-    autoSendInProgress, autoSendExpeditionId, autoSendAwaitingMercenaries,
-    autoSendAwaitingUsolMercs, autoSendExpeditionBlocked, autoSendCollectRetries,
-    MAX_COLLECT_RETRIES, _autoSendUsolSkipped, _autoSendMercRetryCount, MAX_MERC_RETRIES,
-    autoSellCheapestItems, disableAutoSendDueToStashFull,
-    setAutoSendInProgress, setAutoSendExpeditionId, setAutoSendAwaitingMercenaries,
-    setAutoSendAwaitingUsolMercs, setAutoSendExpeditionBlocked, setAutoSendCollectRetries,
+    checkAutoSendOnExpeditionData, proceedWithMerc, waitForAutoSendFunds, resumeAutoSendAfterFunding,
+    autoSendInProgress, autoSendAwaitingMercenaries,
+    autoSendAwaitingUsolMercs, autoSendExpeditionBlocked,
+    _autoSendUsolSkipped, _autoSendMercRetryCount, MAX_MERC_RETRIES,
+    setAutoSendInProgress, setAutoSendAwaitingMercenaries,
+    setAutoSendAwaitingUsolMercs, setAutoSendExpeditionBlocked,
     setAutoSendUsolSkipped, setAutoSendMercRetryCount, setInitialMercsReady
 } from './auto-send.js';
 import { setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, setSeqRefreshRunning } from './auto-update-markets.js';
@@ -33,6 +32,14 @@ export function setupWsRelay() {
         if (event.source !== window) return;
         if (!isContextValid()) return;
         const now = Date.now();
+        const checkedAt = Number.isFinite(event.data?.checkedAt) ? Math.min(event.data.checkedAt, now) : now;
+        if (['COR3_WS_MARKET_REACHABLE', 'COR3_WS_MARKET_RECHECK'].includes(event.data?.type) &&
+            ['dark', 'soyuz', 'usol'].includes(event.data.marketType)) {
+            const prefix = event.data.marketType;
+            chrome.storage.local.set({ [prefix + 'MarketAvailable']: event.data.type === 'COR3_WS_MARKET_REACHABLE' ? true : null,
+                [prefix + 'MarketMaintenanceEndsAt']: null, [prefix + 'MarketBlockerServer']: null,
+                [prefix + 'MarketReachabilityCheckedAt']: checkedAt });
+        }
 
         // WS message logging
         if (event.data && event.data.type === 'COR3_WS_LOG') {
@@ -56,6 +63,13 @@ export function setupWsRelay() {
         if (event.data && event.data.type === 'COR3_WS_DECISIONS') {
             chrome.storage.local.set({ expeditionDecisions: event.data.decisions });
             checkAutoChooseFromContent(event.data.decisions);
+        }
+        if (event.data && event.data.type === 'COR3_WS_MAIL') {
+            chrome.storage.local.set({ mailData: event.data.data, mailDataUpdatedAt: now }, () => {
+                chrome.storage.local.get('expeditionsData', result => {
+                    if (result.expeditionsData) checkAutoSendOnExpeditionData(result.expeditionsData);
+                });
+            });
         }
         if (event.data && event.data.type === 'COR3_WS_SPECIALISTS') {
             chrome.storage.local.set({ specialistsData: event.data.data, specialistsDataUpdatedAt: now });
@@ -113,13 +127,13 @@ export function setupWsRelay() {
             chrome.storage.local.set({ loadoutError: event.data.error, loadoutErrorAction: event.data.action, loadoutUpdatedAt: now });
         }
         if (event.data && event.data.type === 'COR3_WS_DARK_MARKET_UNREACHABLE') {
-            chrome.storage.local.set({ darkMarketAvailable: false, darkMarketDataUpdatedAt: now, darkMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, darkMarketBlockerServer: event.data.blockerServerName || null });
+            chrome.storage.local.set({ darkMarketAvailable: event.data.confirmed === false ? null : false, darkMarketReachabilityCheckedAt: checkedAt, darkMarketDataUpdatedAt: now, darkMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, darkMarketBlockerServer: event.data.blockerServerName || null });
         }
         if (event.data && event.data.type === 'COR3_WS_SOYUZ_MARKET_UNREACHABLE') {
-            chrome.storage.local.set({ soyuzMarketAvailable: false, soyuzMarketDataUpdatedAt: now, soyuzMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, soyuzMarketBlockerServer: event.data.blockerServerName || null });
+            chrome.storage.local.set({ soyuzMarketAvailable: event.data.confirmed === false ? null : false, soyuzMarketReachabilityCheckedAt: checkedAt, soyuzMarketDataUpdatedAt: now, soyuzMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, soyuzMarketBlockerServer: event.data.blockerServerName || null });
         }
         if (event.data && event.data.type === 'COR3_WS_USOL_MARKET_UNREACHABLE') {
-            chrome.storage.local.set({ usolMarketAvailable: false, usolMarketDataUpdatedAt: now, usolMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, usolMarketBlockerServer: event.data.blockerServerName || null });
+            chrome.storage.local.set({ usolMarketAvailable: event.data.confirmed === false ? null : false, usolMarketReachabilityCheckedAt: checkedAt, usolMarketDataUpdatedAt: now, usolMarketMaintenanceEndsAt: event.data.maintenanceEndsAt || null, usolMarketBlockerServer: event.data.blockerServerName || null });
         }
         if (event.data && event.data.type === 'COR3_BEARER_TOKEN') {
             chrome.storage.local.get('bearerToken', (prev) => {
@@ -161,7 +175,9 @@ export function setupWsRelay() {
             setInitialMercsReady(true);
         }
         if (event.data && event.data.type === 'COR3_WS_USOL_MERCENARIES') {
-            chrome.storage.local.set({ usolMercenariesData: event.data.data, usolMercenariesUpdatedAt: now });
+            chrome.storage.local.set({ usolMercenariesData: event.data.data, usolMercenariesUpdatedAt: now,
+                usolMarketAvailable: true, usolMarketMaintenanceEndsAt: null, usolMarketBlockerServer: null,
+                usolMarketReachabilityCheckedAt: now });
         }
         if (event.data && event.data.type === 'COR3_WS_MERC_CONFIGURE' && event.data.mercenaryId) {
             chrome.storage.local.get('mercConfigData', (result) => {
@@ -309,12 +325,14 @@ export function setupWsRelay() {
             });
         }
         if (event.data && event.data.type === 'COR3_WS_EXPEDITION_ARCHIVED') {
-            const archivedId = event.data.data && event.data.data.id;
+            const archivedId = event.data.data && (event.data.data.expeditionId || event.data.data.id);
             if (archivedId) {
                 chrome.storage.local.get('expeditionsData', (result) => {
                     const exps = result.expeditionsData || [];
                     const filtered = exps.filter(e => e.id !== archivedId);
-                    chrome.storage.local.set({ expeditionsData: filtered, expeditionsDataUpdatedAt: now });
+                    chrome.storage.local.set({ expeditionsData: filtered, expeditionsDataUpdatedAt: now }, () => {
+                        checkAutoSendOnExpeditionData(filtered);
+                    });
                 });
             }
         }
@@ -324,185 +342,11 @@ export function setupWsRelay() {
         if (event.data && event.data.type === 'COR3_WS_USOL_EXPEDITION_CONFIG') {
             chrome.storage.local.set({ usolExpeditionConfigData: event.data.data });
         }
-        if (event.data && event.data.type === 'COR3_WS_CONTAINER_OPENED') {
-            if (autoSendInProgress && autoSendExpeditionId) {
-                console.log('[COR3 Helper] Auto-send: Container opened, checking inventory space...');
-                const containerData = event.data.data;
-
-                let spaceNeeded = 2;
-                if (containerData && containerData.items && Array.isArray(containerData.items)) {
-                    spaceNeeded = containerData.items.length;
-                    console.log('[COR3 Helper] Container contains', spaceNeeded, 'items');
-                } else if (containerData && containerData.containerItems && Array.isArray(containerData.containerItems)) {
-                    spaceNeeded = containerData.containerItems.length;
-                    console.log('[COR3 Helper] Container contains', spaceNeeded, 'items (containerItems)');
-                }
-
-                chrome.storage.local.get('stashData', (result) => {
-                    const stash = result.stashData;
-                    let hasSpace = true;
-
-                    if (stash && stash.maxCapacity && stash.currentUsage !== undefined) {
-                        const availableSpace = stash.maxCapacity - stash.currentUsage;
-                        hasSpace = availableSpace >= spaceNeeded;
-                        console.log('[COR3 Helper] Inventory check:', availableSpace, 'available, need', spaceNeeded);
-                    }
-
-                    if (hasSpace) {
-                        console.log('[COR3 Helper] Auto-send: Sufficient space, collecting all in 10s...');
-                        setTimeout(() => {
-                            window.postMessage({ type: 'COR3_COLLECT_ALL', expeditionId: autoSendExpeditionId }, '*');
-                        }, 10000 + Math.floor(Math.random() * 500));
-                    } else {
-                        chrome.storage.sync.get('autoSellCheapest', (sellData) => {
-                            if (sellData.autoSellCheapest && stash && stash.items) {
-                                const availableSpace2 = stash.maxCapacity - stash.currentUsage;
-                                const shortfall = spaceNeeded - availableSpace2;
-                                console.log('[COR3 Helper] Auto-sell: need', shortfall, 'more slot(s), selling cheapest items');
-                                autoSellCheapestItems(stash.items, shortfall, () => {
-                                    window.postMessage({ type: 'COR3_REQUEST_STASH' }, '*');
-                                    setTimeout(() => {
-                                        console.log('[COR3 Helper] Auto-sell done, collecting all in 10s...');
-                                        setTimeout(() => {
-                                            window.postMessage({ type: 'COR3_COLLECT_ALL', expeditionId: autoSendExpeditionId }, '*');
-                                        }, 10000 + Math.floor(Math.random() * 500));
-                                    }, 3000);
-                                });
-                            } else {
-                                console.log('[COR3 Helper] Auto-send: Insufficient space, disabling auto-container-claim');
-                                chrome.storage.sync.get('autoSendMerc', (settings) => {
-                                    if (settings.autoSendMerc) {
-                                        chrome.storage.sync.set({
-                                            autoSendMerc: {
-                                                ...settings.autoSendMerc,
-                                                enabled: false,
-                                                disabledReason: 'stash_full'
-                                            }
-                                        });
-                                    }
-                                });
-                                setAutoSendInProgress(false);
-                                _automationFinish('auto-send');
-                            }
-                        });
-                    }
-                });
-            }
-        }
-        if (event.data && event.data.type === 'COR3_WS_STASH_FULL') {
-            setAutoSendCollectRetries(autoSendCollectRetries + 1);
-            console.log('[COR3 Helper] Stash full error detected (attempt', autoSendCollectRetries, '/', MAX_COLLECT_RETRIES, ')');
-            if (autoSendCollectRetries > MAX_COLLECT_RETRIES) {
-                console.log('[COR3 Helper] Max collect retries reached, giving up');
-                setAutoSendCollectRetries(0);
-                disableAutoSendDueToStashFull();
-                return;
-            }
-            chrome.storage.sync.get('autoSellCheapest', (sellData) => {
-                if (sellData.autoSellCheapest) {
-                    chrome.storage.local.get('stashData', (result) => {
-                        const stash = result.stashData;
-                        if (stash && stash.items) {
-                            console.log('[COR3 Helper] Auto-sell: selling cheapest items to free space after collect.all stash-full');
-                            autoSellCheapestItems(stash.items, 2, () => {
-                                window.postMessage({ type: 'COR3_REQUEST_STASH' }, '*');
-                                setTimeout(() => {
-                                    if (autoSendExpeditionId) {
-                                        console.log('[COR3 Helper] Auto-sell done, retrying collect all in 10s...');
-                                        setTimeout(() => {
-                                            window.postMessage({ type: 'COR3_COLLECT_ALL', expeditionId: autoSendExpeditionId }, '*');
-                                        }, 10000 + Math.floor(Math.random() * 500));
-                                    }
-                                }, 3000);
-                            });
-                        } else {
-                            setAutoSendCollectRetries(0);
-                            disableAutoSendDueToStashFull();
-                        }
-                    });
-                } else {
-                    setAutoSendCollectRetries(0);
-                    disableAutoSendDueToStashFull();
-                }
-            });
-        }
         if (event.data && event.data.type === 'COR3_WS_INSUFFICIENT_CREDITS') {
-            console.log('[COR3 Helper] Insufficient credits for expedition launch, disabling auto-send mercenary');
-            chrome.storage.sync.get('autoSendMerc', (settings) => {
-                if (settings.autoSendMerc) {
-                    chrome.storage.sync.set({
-                        autoSendMerc: {
-                            ...settings.autoSendMerc,
-                            enabled: false,
-                            disabledReason: 'insufficient_credits'
-                        }
-                    });
-                }
-            });
-            chrome.storage.local.set({
-                expeditionLaunchError: {
-                    error: 'Insufficient credits to launch expedition',
-                    retryAfter: 0,
-                    timestamp: Date.now(),
-                    noRetry: true
-                }
-            });
-            setAutoSendInProgress(false);
-            _automationFinish('auto-send');
-            setAutoSendExpeditionId(null);
+            waitForAutoSendFunds();
         }
-        if (event.data && event.data.type === 'COR3_WS_COLLECT_INSUFFICIENT_CREDITS') {
-            console.log('[COR3 Helper] Insufficient credits for collect.all, disabling auto-send mercenary');
-            chrome.storage.sync.get('autoSendMerc', (settings) => {
-                if (settings.autoSendMerc) {
-                    chrome.storage.sync.set({
-                        autoSendMerc: {
-                            ...settings.autoSendMerc,
-                            enabled: false,
-                            disabledReason: 'insufficient_credits'
-                        }
-                    });
-                }
-            });
-            chrome.storage.local.set({
-                expeditionLaunchError: {
-                    error: 'Insufficient credits to open reward container. Auto-send disabled.',
-                    retryAfter: 0,
-                    timestamp: Date.now(),
-                    noRetry: true
-                }
-            });
-            setAutoSendInProgress(false);
-            _automationFinish('auto-send');
-            setAutoSendExpeditionId(null);
-        }
-        if (event.data && event.data.type === 'COR3_WS_COLLECTED_ALL') {
-            setAutoSendCollectRetries(0);
-            const collectedId = event.data.data && event.data.data.id;
-            if (collectedId) {
-                chrome.storage.local.get('expeditionsData', (result) => {
-                    const exps = result.expeditionsData || [];
-                    const filtered = exps.filter(e => e.id !== collectedId);
-                    chrome.storage.local.set({ expeditionsData: filtered, expeditionsDataUpdatedAt: now });
-                });
-            }
-            if (autoSendInProgress && autoSendExpeditionId) {
-                console.log('[COR3 Helper] Auto-send: All collected, refreshing mercenaries (CORE + USOL)...');
-                setAutoSendExpeditionId(null);
-                setTimeout(() => {
-                    window.postMessage({ type: 'COR3_REQUEST_STASH' }, '*');
-                }, 500);
-                var mercDelay = 2500 + Math.floor(Math.random() * 1000);
-                setTimeout(() => {
-                    if (!autoSendInProgress || (getAutomationActive() && getAutomationActive().type !== 'auto-send')) {
-                        console.log('[COR3 Helper] Auto-send: merc refresh skipped (no longer active or another automation took over)');
-                        return;
-                    }
-                    window.postMessage({ type: 'COR3_REQUEST_MERCENARIES' }, '*');
-                }, mercDelay);
-                setAutoSendAwaitingMercenaries(false);
-                setAutoSendAwaitingUsolMercs(true);
-            }
+        if (event.data?.type === 'COR3_AUTOJOB_PROFILE_CREDITS' && event.data.data?.amount > 0) {
+            resumeAutoSendAfterFunding(event.data.data.newBalance);
         }
         if (event.data && event.data.type === 'COR3_WS_MERC_NOT_AVAILABLE') {
             setAutoSendMercRetryCount(_autoSendMercRetryCount + 1);
@@ -530,6 +374,7 @@ export function setupWsRelay() {
         if (event.data && event.data.type === 'COR3_WS_EXPEDITION_LAUNCHED') {
             console.log('[COR3 Helper] Expedition launched successfully');
             setAutoSendMercRetryCount(0);
+            chrome.storage.local.remove(['expeditionLaunchError', 'mercWarning']);
         }
         if (event.data && event.data.type === 'COR3_WS_EXPEDITION_LAUNCH_ERROR') {
             console.log('[COR3 Helper] Expedition launch error:', event.data.error);
@@ -539,7 +384,6 @@ export function setupWsRelay() {
                 chrome.storage.local.set({ autoSendExpeditionBlocked: true });
                 setAutoSendInProgress(false);
                 _automationFinish('auto-send');
-                setAutoSendExpeditionId(null);
             } else {
                 chrome.storage.local.set({
                     expeditionLaunchError: {
@@ -596,10 +440,6 @@ export function setupWsRelay() {
                 dailyHackLog: event.data.message,
                 dailyHackLogUpdatedAt: Date.now()
             });
-        }
-        // Auto-disable daily hack toggle
-        if (event.data && event.data.type === 'COR3_DAILY_HACK_DISABLE_TOGGLE') {
-            chrome.storage.sync.set({ autoDailyHackEnabled: false });
         }
         // Auto-fetch daily ops on page load
         if (event.data && event.data.type === 'COR3_FETCH_DAILY_OPS') {

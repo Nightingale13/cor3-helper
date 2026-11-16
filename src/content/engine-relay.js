@@ -2,7 +2,7 @@
 
 import { isContextValid, _automationFinish } from './helpers.js';
 import { setMarketRefreshInProgress, setAutoJobsActive } from './auto-update-markets.js';
-import { setInitialFetchDone, setAutoSendInProgress, setAutoSendExpeditionId, setAutoSendAwaitingMercenaries, setAutoSendAwaitingUsolMercs, setAutoSendDeferredWaiting, setAutoSendUsolSkipped, setAutoSendMercRetryCount, autoSendInProgress, checkAutoSendOnExpeditionData } from './auto-send.js';
+import { setInitialFetchDone, setAutoSendInProgress, setAutoSendAwaitingMercenaries, setAutoSendAwaitingUsolMercs, setAutoSendDeferredWaiting, setAutoSendUsolSkipped, setAutoSendMercRetryCount, autoSendInProgress, checkAutoSendOnExpeditionData } from './auto-send.js';
 import { injectDecryptSolver, injectIceWallSolver, injectSimpleDecryptSolver } from './solvers.js';
 import { queueAutoJobLog, queueValuableLog } from './log-writers.js';
 
@@ -108,7 +108,7 @@ export function setupEngineRelay() {
             setMarketRefreshInProgress(false);
             chrome.storage.local.set({ _allMarketsRefreshed: Date.now() });
         }
-        if (event.data && event.data.type === 'COR3_TOKEN_EXPIRED') {
+        if (event.data && ['COR3_TOKEN_EXPIRED', 'COR3_CONNECTION_LOST'].includes(event.data.type)) {
             setMarketRefreshInProgress(false);
             import('./auto-update-markets.js').then(m => m.setSeqRefreshRunning(false));
             setInitialFetchDone(false);
@@ -116,7 +116,6 @@ export function setupEngineRelay() {
             if (autoSendInProgress) {
                 console.log('[COR3 Helper] Token expired — aborting in-progress auto-send');
                 setAutoSendInProgress(false);
-                setAutoSendExpeditionId(null);
                 setAutoSendAwaitingMercenaries(false);
                 setAutoSendAwaitingUsolMercs(false);
                 setAutoSendDeferredWaiting(false);
@@ -198,6 +197,7 @@ export function setupEngineRelay() {
             }
             chrome.storage.local.set({ valuableForceMaintenanceDone: fmDoneData });
             chrome.storage.local.remove('forceMaintenanceInProgress');
+            _automationFinish('force-maintenance');
         }
         if (event.data && event.data.type === 'COR3_VALUABLE_DONE') {
             chrome.storage.local.set({ valuableSearchRunning: false, valuableSellerRunning: false });

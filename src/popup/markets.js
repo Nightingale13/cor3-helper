@@ -804,7 +804,7 @@ export function initMarketCacheLoad() {
             }
             renderDarkMarket(result.darkMarketData || null, result.darkMarketAvailable, result.darkMarketMaintenanceEndsAt, result.darkMarketBlockerServer);
         } else {
-            const darkBlocker = findMaintenanceBlocker(result.serverMaintenanceMap, 'dark');
+            const darkBlocker = result.darkMarketAvailable === true ? null : findMaintenanceBlocker(result.serverMaintenanceMap, 'dark');
             if (darkBlocker) {
                 renderDarkMarket(null, false, darkBlocker.maintenanceEndsAt, darkBlocker.blockerName);
             } else {
@@ -824,7 +824,7 @@ export function initMarketCacheLoad() {
             }
             renderSoyuzMarket(result.soyuzMarketData || null, result.soyuzMarketAvailable, result.soyuzMarketMaintenanceEndsAt, result.soyuzMarketBlockerServer);
         } else {
-            const soyuzBlocker = findMaintenanceBlocker(result.serverMaintenanceMap, 'soyuz');
+            const soyuzBlocker = result.soyuzMarketAvailable === true ? null : findMaintenanceBlocker(result.serverMaintenanceMap, 'soyuz');
             if (soyuzBlocker) {
                 renderSoyuzMarket(null, false, soyuzBlocker.maintenanceEndsAt, soyuzBlocker.blockerName);
             } else {
@@ -844,7 +844,7 @@ export function initMarketCacheLoad() {
             }
             renderUsolMarket(result.usolMarketData || null, result.usolMarketAvailable, result.usolMarketMaintenanceEndsAt, result.usolMarketBlockerServer);
         } else {
-            const usolBlocker = findMaintenanceBlocker(result.serverMaintenanceMap, 'usol');
+            const usolBlocker = result.usolMarketAvailable === true ? null : findMaintenanceBlocker(result.serverMaintenanceMap, 'usol');
             if (usolBlocker) {
                 renderUsolMarket(null, false, usolBlocker.maintenanceEndsAt, usolBlocker.blockerName);
             } else {

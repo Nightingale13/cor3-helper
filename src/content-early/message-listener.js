@@ -1,7 +1,9 @@
 // Message listener: handles postMessage requests from content.js / popup
-import { wsSend, wsSendRaw, leaveRoom } from './ws-send.js';
+import { wsSend, wsSendRaw, leaveRoom, withWsOwner, cancelWsOwner } from './ws-send.js';
 import { OrigWebSocket, trackedSockets, socketLastActivity, getActiveSocket, setActiveSocket } from './state.js';
 import { findHackSoftwareForServerType, findBestSoftwareLoadout, getServerTypeName, hardwareMatches } from '../shared/loadout-resolver.js';
+import { requestJobMarketRead, cancelJobMarketRead } from './job-markets.js';
+import { cancelRequest } from './request-control.js';
 
 // Periodic socket health check: clean up dead sockets and detect stale connections
 export function installSocketHealthCheck() {
@@ -33,8 +35,9 @@ export function installSocketHealthCheck() {
 export function installMessageListener() {
     window.addEventListener('message', function (event) {
         if (event.source !== window) return;
+        if (event.data?.type === 'COR3_CANCEL_REQUEST') { cancelRequest(event.data.requestId); return; }
         if (event.data && event.data.type === 'COR3_REQUEST_EXPEDITIONS') {
-            window.__cor3RequestExpeditions();
+            window.__cor3RequestExpeditions(event.data.requestId);
         }
         if (event.data && event.data.type === 'COR3_REQUEST_NETWORK_MAP') {
             window.__cor3AutoJobGetNetworkMap();
@@ -597,7 +600,7 @@ export function installMessageListener() {
             })(event.data.serverId);
         }
         if (event.data && event.data.type === 'COR3_REQUEST_STASH') {
-            window.__cor3RequestStash();
+            window.__cor3RequestStash(event.data.requestId);
         }
         if (event.data && event.data.type === 'COR3_REQUEST_SPECIALISTS') {
             window.__cor3RequestSpecialists();
@@ -606,7 +609,7 @@ export function installMessageListener() {
             window.__cor3PurchaseSpecialist(event.data.specialistType, event.data.kind, event.data.level, event.data.priceId);
         }
         if (event.data && event.data.type === 'COR3_REQUEST_LOADOUT') {
-            window.__cor3RequestLoadout();
+            window.__cor3RequestLoadout(true);
         }
         if (event.data && event.data.type === 'COR3_EQUIP_HARDWARE') {
             window.__cor3EquipHardware(event.data.moduleConfigId);
@@ -642,16 +645,17 @@ export function installMessageListener() {
             window.__cor3RefreshUsolMarket();
         }
         if (event.data && event.data.type === 'COR3_REFRESH_ALL_MARKETS_SEQ') {
-            var opts = {};
+            var opts = { requestId: event.data.requestId };
             if (event.data.skipLots) opts.skipLots = true;
             if (event.data.order) opts.order = event.data.order;
             window.__cor3RefreshAllMarketsSequential(null, opts);
         }
+        if (event.data?.type === 'COR3_STOP_MARKET_REFRESH') window.__cor3StopMarketRefresh(event.data.requestId);
         if (event.data && event.data.type === 'COR3_LEAVE_STASH') {
             leaveRoom('stash');
         }
         if (event.data && event.data.type === 'COR3_SELL_ITEM') {
-            window.__cor3SellItem(event.data.itemId, event.data.quantity || 1, event.data.skipStashRefresh);
+            window.__cor3SellItem(event.data.itemId, event.data.quantity || 1, event.data.skipStashRefresh, event.data.requestId);
         }
         // Decision response from popup
         if (event.data && event.data.type === 'COR3_RESPOND_DECISION') {
@@ -670,31 +674,33 @@ export function installMessageListener() {
         if (event.data && event.data.type === 'COR3_REQUEST_USOL_MERCENARIES') {
             window.__cor3RequestUsolMercenaries(function () {
                 window.postMessage({ type: 'COR3_USOL_MERCS_DONE' }, '*');
-            });
+            }, { force: !!event.data.force });
         }
         if (event.data && event.data.type === 'COR3_REQUEST_EXPEDITION_CONFIG') {
             window.__cor3RequestExpeditionConfig();
         }
         if (event.data && event.data.type === 'COR3_LAUNCH_EXPEDITION') {
             // Store launch data for potential retry
-            window.__cor3LaunchExpedition(event.data.config);
+            window.__cor3LaunchExpedition(event.data.config, event.data.requestId, event.data.keepCreditReserve === true);
         }
         if (event.data && event.data.type === 'COR3_RELAUNCH_EXPEDITION') {
             console.log('[COR3 Helper] Relaunching expedition with stored data');
             window.__cor3LaunchExpedition(event.data.data);
         }
-        if (event.data && event.data.type === 'COR3_OPEN_CONTAINER') {
-            window.__cor3OpenContainer(event.data.expeditionId);
+        if (event.data && event.data.type === 'COR3_REQUEST_MAIL') {
+            window.__cor3RequestMail(event.data.requestId);
         }
-        if (event.data && event.data.type === 'COR3_COLLECT_ALL') {
-            window.__cor3CollectAll(event.data.expeditionId);
+        if (event.data && event.data.type === 'COR3_PAY_EXPEDITION_TO_MAIL') {
+            window.__cor3PayExpeditionToMail(event.data.expeditionId, event.data.requestId);
+        }
+        if (event.data && event.data.type === 'COR3_CLAIM_MAIL') {
+            window.__cor3ClaimMail(event.data.messageId, event.data.requestId);
         }
         if (event.data && event.data.type === 'COR3_STOP_DECRYPT_SOLVER') {
             window.__solverAbort = true;
         }
         if (event.data && event.data.type === 'COR3_STOP_DAILY_HACK') {
             window.__dailyHackAbort = true;
-            window.__dailyHackActive = false;
         }
         if (event.data && event.data.type === 'COR3_START_DECRYPT_SOLVER') {
             // If solver is already running, do nothing
@@ -715,10 +721,15 @@ export function installMessageListener() {
             window.__cor3KeepAlive();
         }
         // --- Auto Job Solver commands from content.js ---
+        if (event.data?.type === 'COR3_AUTOJOB_STOP') cancelWsOwner('auto-jobs');
+        if (event.data?.type === 'COR3_VALUABLE_STOP') cancelWsOwner('auto-valuable');
         if (event.data && event.data.type === 'COR3_AUTOJOB_CMD') {
+            withWsOwner(event.data.owner || 'auto-jobs', () => {
             var cmd = event.data.cmd;
             var d = event.data.data || {};
             if (cmd === 'job.take') window.__cor3AutoJobTake(d.marketId, d.jobId);
+            else if (cmd === 'market.read') requestJobMarketRead(d);
+            else if (cmd === 'market.read.cancel') cancelJobMarketRead(d.requestId);
             else if (cmd === 'job.complete') window.__cor3AutoJobComplete(d.marketId, d.jobId);
             else if (cmd === 'job.dismiss') window.__cor3AutoJobDismiss(d.marketId, d.jobId);
             else if (cmd === 'get.jobs') window.__cor3AutoJobGetMarketOptions(d.marketId);
@@ -751,6 +762,7 @@ export function installMessageListener() {
             else if (cmd === 'log.search-valuable') window.__cor3ValuableLogSearch(d.serverId);
             else if (cmd === 'get.sellable-items') window.__cor3ValuableGetSellableItems(d.marketId);
             else if (cmd === 'sell.items') window.__cor3ValuableSellItems(d.marketId, d.items);
+            });
         }
         // --- Secret Connection/Server Finder ---
         if (event.data && event.data.type === 'COR3_IP_SEARCH_START') {

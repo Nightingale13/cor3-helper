@@ -14,12 +14,17 @@ import './log-writers.js';
 // Setup functions (register listeners)
 import { setupWsRelay } from './ws-relay.js';
 import { setupMessageListener } from './message-listener.js';
+import { setupDrone } from './drone.js';
+import { setupAutoDailyHack } from './daily-hack.js';
 import { setupEngineRelay } from './engine-relay.js';
-import { checkAutoSendOnExpeditionData } from './auto-send.js';
+import { checkAutoSendOnExpeditionData, stopAutoSend, setupAutoSendRecovery } from './auto-send.js';
 
 setupWsRelay();
 setupMessageListener();
 setupEngineRelay();
+setupDrone();
+setupAutoDailyHack();
+setupAutoSendRecovery();
 
 // On page load: check cached expedition data for auto-send trigger
 setTimeout(() => {
@@ -35,6 +40,7 @@ setTimeout(() => {
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync' || !changes.autoSendMerc) return;
     const newVal = changes.autoSendMerc.newValue;
+    if (!newVal?.enabled) stopAutoSend();
     if (newVal && newVal.enabled) {
         console.log('[COR3 Helper] Auto-send mercenary enabled — checking expedition data');
         chrome.storage.local.get('expeditionsData', (result) => {
@@ -60,10 +66,9 @@ window.addEventListener('unhandledrejection', (e) => {
 
 // Clean up auto-jobs state on page reload — always start fresh
 // (autoJobsLockedJobs is preserved — the solver reads and clears it on next start)
-chrome.storage.local.remove('initialFetchDoneAt');
-chrome.storage.local.get('autoJobsRunning', (data) => {
+export const contentReady = chrome.storage.local.remove('initialFetchDoneAt').then(() => chrome.storage.local.get('autoJobsRunning')).then(data => {
     if (data.autoJobsRunning) {
         console.log('[COR3 Helper] Page reloaded — clearing stale auto-jobs state');
-        chrome.storage.local.set({ autoJobsRunning: false, autoJobsQueue: [] });
+        return chrome.storage.local.set({ autoJobsRunning: false, autoJobsQueue: [] });
     }
 });

@@ -2,8 +2,13 @@
 import {
     trackedSockets,
     setTokenExpiredFlag, bumpMarketRefreshAbortId,
-    USOL_MARKET_ID
+    USOL_MARKET_ID, markMarketReachable, invalidateMarketBlockage
 } from './state.js';
+import { HOME_SERVER_ID, MARKET_SERVER_IDS } from '../shared/server-constants.js';
+import { marketRouteBlocker } from '../shared/market-reachability.js';
+import { handleDroneMessage } from './drone.js';
+import { relayJobMarketRead } from './job-markets.js';
+import { takeResponse } from './request-tracker.js';
 import { queueRetryOp, humanDelay } from './ws-send.js';
 
 // Forward declaration — set by index.js after market-requests is loaded
@@ -31,6 +36,16 @@ export function handleWsMessage(rawData, socket) {
 
     const eventName = parsed[0];
     const payload = parsed[1];
+    const outbound = takeResponse(socket, eventName, payload);
+    const automationReply = outbound?.source === 'helper' && !outbound.ambiguous;
+    // Untagged errors cannot be assigned safely when the user interleaves the
+    // same action. The automation rechecks state instead of blaming its request.
+    if (outbound?.ambiguous && payload?.error && eventName !== 'market') return;
+    if (payload?.error && outbound?.requestId && ['get.active', 'get.state'].includes(payload.event?.action)) {
+        window.postMessage({ type: 'COR3_REQUEST_ERROR', requestId: outbound.requestId, error: payload.error }, '*');
+        return;
+    }
+    if (handleDroneMessage(eventName, payload, outbound)) return;
 
     // Handle token-expired error — close sockets to force game to reconnect with fresh token
     if (eventName === 'error' && payload && payload.message === 'token-expired') {
@@ -44,6 +59,7 @@ export function handleWsMessage(rawData, socket) {
         // Queue NON-market data fetches for retry (markets will be handled by initialFetch)
         queueRetryOp('expeditions');
         queueRetryOp('stash');
+        queueRetryOp('mail');
         queueRetryOp('dailyOps');
         window.postMessage({ type: 'COR3_TOKEN_EXPIRED' }, '*');
         // Close all tracked sockets — Socket.IO will auto-reconnect with a new token
@@ -74,8 +90,24 @@ export function handleWsMessage(rawData, socket) {
     if (eventName === 'stash' && payload && payload.data) {
         window.postMessage({
             type: 'COR3_WS_STASH',
-            stash: payload.data
+            stash: payload.data, requestId: outbound?.requestId
         }, '*');
+    }
+
+    if (eventName === 'mail' && payload) {
+        var mailAction = payload.event && payload.event.action;
+        if (payload.data && Array.isArray(payload.data.messages)) {
+            window.postMessage({ type: 'COR3_WS_MAIL', data: payload.data, requestId: outbound?.requestId }, '*');
+        }
+        if (mailAction === 'claim.all') {
+            const claimData = payload.data?.attachmentId && !Array.isArray(payload.data.results)
+                ? { results: [payload.data] } : payload.data;
+            window.postMessage({
+                type: 'COR3_WS_MAIL_CLAIM_RESULT', data: claimData || null,
+                error: payload.error || null, requestId: outbound?.requestId || payload.requestId
+            }, '*');
+        }
+        return;
     }
 
     // Intercept loadout responses
@@ -116,6 +148,7 @@ export function handleWsMessage(rawData, socket) {
 
     // Intercept mercenary responses — detect market by faction key (core_main vs usol_employment)
     if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'get.mercenaries') {
+        if (payload.error || !payload.data) return;
         var mercFactionKey = null;
         if (payload.data && payload.data.mercenaries && payload.data.mercenaries.length > 0) {
             var firstMerc = payload.data.mercenaries[0];
@@ -127,7 +160,11 @@ export function handleWsMessage(rawData, socket) {
             if (firstElite.mercenary && firstElite.mercenary.faction && firstElite.mercenary.faction.key) mercFactionKey = firstElite.mercenary.faction.key;
             if (!mercFactionKey && firstElite.marketId === USOL_MARKET_ID) mercFactionKey = 'usol_employment';
         }
-        if (mercFactionKey === 'usol_employment') {
+        if (!mercFactionKey && outbound?.ambiguous) return;
+        const usolMercs = mercFactionKey === 'usol_employment' ||
+            (!mercFactionKey && !outbound?.ambiguous && outbound?.marketId === USOL_MARKET_ID);
+        if (usolMercs) {
+            markMarketReachable('usol');
             window.postMessage({ type: 'COR3_WS_USOL_MERCENARIES', data: payload.data }, '*');
         } else {
             // core_main or unknown — treat as CORE
@@ -141,8 +178,11 @@ export function handleWsMessage(rawData, socket) {
 
     // Intercept expedition config response (locations/zones/goals) — detect USOL by pending flag
     if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'get.config') {
+        if (payload.error || !payload.data) return;
+        if (outbound?.ambiguous) return;
         // Detect if this is a USOL config response by checking if USOL merc fetch is in progress
-        var isUsolConfig = !!window.__cor3UsolMercFetchInProgress;
+        var isUsolConfig = !outbound?.ambiguous && outbound?.marketId
+            ? outbound.marketId === USOL_MARKET_ID : !!window.__cor3UsolMercFetchInProgress;
         if (payload.data && payload.data.locations && payload.data.locations.length > 0) {
             var picked = window.__cor3PickLocationConfig(payload.data.locations);
             if (isUsolConfig) {
@@ -159,54 +199,15 @@ export function handleWsMessage(rawData, socket) {
         return;
     }
 
-    // Intercept open.container response
-    if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'open.container') {
+    if (eventName === 'expeditions' && payload?.event?.action === 'open.container') {
         window.postMessage({
-            type: 'COR3_WS_CONTAINER_OPENED',
-            data: payload.data
+            type: 'COR3_WS_EXPEDITION_SETTLED', data: payload.data || null, requestId: outbound?.requestId,
+            error: payload.error || null
         }, '*');
-        // Also update expedition data so UI shows container items
-        if (payload.data && payload.data.id) {
-            window.postMessage({
-                type: 'COR3_WS_EXPEDITIONS',
-                expeditions: [payload.data]
-            }, '*');
-        }
         return;
     }
 
-    // Intercept collect.all response
-    if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'collect.all') {
-        // Check for stash full error
-        if (payload.error && (payload.error.message === 'Insufficient stash capacity' || payload.error.message === 'stash.error.insufficient_capacity')) {
-            window.postMessage({
-                type: 'COR3_WS_STASH_FULL',
-                error: payload.error.message,
-                requestId: payload.requestId
-            }, '*');
-        } else if (payload.error && payload.error.message === 'insufficient-credits') {
-            console.log('[COR3 Helper] collect.all failed: insufficient credits');
-            window.postMessage({
-                type: 'COR3_WS_COLLECT_INSUFFICIENT_CREDITS',
-                error: payload.error.message
-            }, '*');
-        } else if (payload.error) {
-            console.log('[COR3 Helper] collect.all failed with unexpected error:', payload.error.message);
-            window.postMessage({
-                type: 'COR3_WS_STASH_FULL',
-                error: payload.error.message,
-                requestId: payload.requestId
-            }, '*');
-        } else {
-            window.postMessage({
-                type: 'COR3_WS_COLLECTED_ALL',
-                data: payload.data
-            }, '*');
-        }
-        return;
-    }
-
-    // Intercept insert.archive response (expedition fully archived after collect.all)
+    // Keep cached expeditions in sync when the server archives a finished raid
     if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'insert.archive') {
         window.postMessage({
             type: 'COR3_WS_EXPEDITION_ARCHIVED',
@@ -217,6 +218,11 @@ export function handleWsMessage(rawData, socket) {
 
     // Intercept launch response
     if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'launch') {
+        window.postMessage({ type: 'COR3_WS_EXPEDITION_LAUNCH_RESULT', requestId: outbound?.requestId,
+            data: payload.data || null, error: payload.error || null }, '*');
+        // Automated launches handle their own acknowledgement and reconciliation.
+        // Avoid also running the legacy manual-launch retry branches.
+        if (payload.error && outbound?.requestId) return;
         // Check for launch errors
         if (payload.error && payload.error.message === 'Maximum 1 active expedition allowed') {
             console.log('[COR3 Helper] Expedition launch failed: Maximum 1 active expedition allowed');
@@ -255,6 +261,12 @@ export function handleWsMessage(rawData, socket) {
             return;
         }
 
+        if (payload.error || !payload.data?.id || !payload.data?.status) {
+            window.postMessage({ type: 'COR3_WS_EXPEDITION_LAUNCH_ERROR',
+                error: payload.error?.message || payload.error?.code || 'The launch was not confirmed.' }, '*');
+            return;
+        }
+
         // Successful launch
         window.postMessage({
             type: 'COR3_WS_EXPEDITION_LAUNCHED',
@@ -286,10 +298,10 @@ export function handleWsMessage(rawData, socket) {
     }
 
     // Intercept market responses — handle get.options, get.lots, get.jobs separately
+    if (eventName === 'market') relayJobMarketRead(payload, outbound);
     // Markets are fetched one at a time (sequential per market) but within each market,
     // get.options + get.lots + get.jobs are sent as a parallel batch.
-    // get.lots/get.jobs responses don't contain the market ID, so
-    // __cor3CurrentMarketFetch (set by get.options response) tracks which market we're fetching.
+    // Attribute ID-less responses to their actual outbound request on this socket.
     if (eventName === 'market' && payload && payload.data) {
         var mktAction = payload.event ? payload.event.action : null;
 
@@ -316,11 +328,10 @@ export function handleWsMessage(rawData, socket) {
 
         // get.options: contains market info, reputation, userCredits (no lots/jobs)
         var mkt = payload.data.market;
-        if (mktAction === 'get.options' && mkt && mkt.marketName) {
+        if (mktAction === 'get.options' && mkt && mkt.marketName && !payload.error) {
             var marketType = resolveMarketType(mkt.id);
+            markMarketReachable(marketType);
             var cacheKey = marketCacheKey(marketType);
-            // Track which market we're currently fetching (for get.lots/get.jobs routing)
-            window.__cor3CurrentMarketFetch = mkt.id;
             // Initialize or reset cache with get.options data
             // Preserve existing jobs/recentJobs/nextJobsResetAt/lots so UI doesn't flicker
             var prevJobs = window[cacheKey] ? window[cacheKey].jobs : undefined;
@@ -337,9 +348,8 @@ export function handleWsMessage(rawData, socket) {
         }
 
         // get.lots: merge lots into cached market data
-        // Uses __cor3CurrentMarketFetch to identify which market this belongs to
-        if (mktAction === 'get.lots' && payload.data.lots) {
-            var lotsMarketId = window.__cor3CurrentMarketFetch;
+        if (mktAction === 'get.lots' && payload.data.lots && outbound?.marketId && !outbound.ambiguous) {
+            var lotsMarketId = outbound.marketId;
             var lotsType = resolveMarketType(lotsMarketId);
             var lotsCacheKey = marketCacheKey(lotsType);
             if (window[lotsCacheKey]) {
@@ -349,9 +359,8 @@ export function handleWsMessage(rawData, socket) {
         }
 
         // get.jobs: merge jobs into cached market data
-        // Uses __cor3CurrentMarketFetch to identify which market this belongs to
-        if (mktAction === 'get.jobs') {
-            var jobsMarketId = window.__cor3CurrentMarketFetch;
+        if (mktAction === 'get.jobs' && outbound?.marketId && !outbound.ambiguous) {
+            var jobsMarketId = outbound.marketId;
             var jobsType = resolveMarketType(jobsMarketId);
             var jobsCacheKey = marketCacheKey(jobsType);
             if (window[jobsCacheKey]) {
@@ -360,7 +369,7 @@ export function handleWsMessage(rawData, socket) {
                 window[jobsCacheKey].nextJobsResetAt = payload.data.nextJobsResetAt || window[jobsCacheKey].nextJobsResetAt;
                 postMarketUpdate(jobsType, window[jobsCacheKey]);
                 // Signal that this market's data is fully loaded
-                window.postMessage({ type: 'COR3_MARKET_FETCH_COMPLETE', marketId: jobsMarketId, marketType: jobsType }, '*');
+                if (automationReply) window.postMessage({ type: 'COR3_MARKET_FETCH_COMPLETE', marketId: jobsMarketId, marketType: jobsType }, '*');
             }
         }
 
@@ -385,7 +394,11 @@ export function handleWsMessage(rawData, socket) {
     // Intercept network-map responses (endpoint set success/failure)
     // detect no-path-to-server, server-in-maintenance, and market-not-reachable errors
     if (eventName === 'network-map' && payload && payload.event) {
-        if (payload.event.action === 'set.endpoint') {
+        if (payload.event.action === 'set.endpoint' && !payload.error && !outbound?.ambiguous) {
+            const type = Object.keys(MARKET_SERVER_IDS).find(key => MARKET_SERVER_IDS[key] === outbound?.serverId);
+            if (type) markMarketReachable(type);
+        }
+        if (payload.event.action === 'set.endpoint' && automationReply) {
             var errMsg = payload.error && payload.error.message;
             var isUnreachableErr = errMsg === 'no-path-to-server' || errMsg === 'server-in-maintenance' || errMsg === 'market-not-reachable';
             if (payload.error && isUnreachableErr) {
@@ -418,7 +431,7 @@ export function handleWsMessage(rawData, socket) {
                 }
             } else {
                 var success = !payload.error;
-                var epServerId = (payload.error && payload.error.serverId) || null;
+                var epServerId = outbound?.serverId || (payload.error && payload.error.serverId) || null;
                 window.postMessage({
                     type: 'COR3_WS_ENDPOINT_RESULT',
                     success: success,
@@ -429,8 +442,14 @@ export function handleWsMessage(rawData, socket) {
             }
         }
         // Intercept get.map for server maintenance data + server type info
-        if (payload.event.action === 'get.map' && payload.data && payload.data.servers) {
+        if (payload.event.action === 'get.map' && Array.isArray(payload.data?.servers)) {
             var servers = payload.data.servers;
+            if (Array.isArray(payload.data.connections) && servers.some(server => server.id === HOME_SERVER_ID || server.serverTypeName === 'Home' || server.serverName === 'Home Server')) {
+                for (const [type, target] of Object.entries(MARKET_SERVER_IDS)) {
+                    if (servers.some(server => server.id === target) &&
+                        !marketRouteBlocker(servers, payload.data.connections, target)) invalidateMarketBlockage(type);
+                }
+            }
             var maintenanceInfo = {};
             var serverTypeMap = {};
             for (var si = 0; si < servers.length; si++) {
@@ -459,7 +478,7 @@ export function handleWsMessage(rawData, socket) {
     }
 
     // --- Auto Job Solver: Intercept SAI responses ---
-    if (eventName === 'sai' && payload && payload.event) {
+    if (eventName === 'sai' && payload && payload.event && (automationReply || payload.event.action === 'update')) {
         var action = payload.event.action;
         // Login status
         if (action === 'get.login.status') {
@@ -600,7 +619,7 @@ export function handleWsMessage(rawData, socket) {
     }
 
     // --- Auto Job Solver: Intercept market job.take and job.complete ---
-    if (eventName === 'market' && payload && payload.event) {
+    if (eventName === 'market' && payload && payload.event && automationReply) {
         if (payload.event.action === 'job.take') {
             window.postMessage({ type: 'COR3_AUTOJOB_JOB_TAKEN', data: payload.data, error: payload.error || null }, '*');
         }
@@ -623,7 +642,8 @@ export function handleWsMessage(rawData, socket) {
 
     // Handle expedition update events for listening-based updates
     if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'update') {
-        console.log('[COR3 Helper] Expedition update event detected - data will flow through existing handlers');
+        // Updates are not a full active-slot snapshot. Read the current state.
+        window.__cor3RequestExpeditions?.();
         return;
     }
 
@@ -645,12 +665,14 @@ export function handleWsMessage(rawData, socket) {
             return;
         }
 
-        const expeditions = Array.isArray(payload.data) ? payload.data : [payload.data];
+        if (expAction !== 'get.active' || !Array.isArray(payload.data) ||
+            !payload.data.every(expedition => expedition?.id && expedition.status)) return;
+        const expeditions = payload.data;
 
         // Relay full expedition data for expedition info display
         window.postMessage({
             type: 'COR3_WS_EXPEDITIONS',
-            expeditions: expeditions
+            expeditions: expeditions, requestId: outbound?.requestId
         }, '*');
 
         const decisionsFound = [];

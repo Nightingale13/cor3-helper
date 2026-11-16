@@ -1,6 +1,8 @@
 // Auto Update Markets toggle and periodic refresh logic
 
 import { isContextValid, _automationEnqueue, _automationFinish } from './helpers.js';
+import { safeTimeout, safeClearTimeout } from '../shared/ws-utils.js';
+import { _initialFetchDone } from './auto-send.js';
 
 export let _autoUpdateMarkets = false;
 export let _marketRefreshInProgress = false;
@@ -8,6 +10,34 @@ export let _autoUpdateMarketsLastRefresh = 0;
 export let _seqRefreshRunning = false;
 export let _autoJobsActive = false;
 const _AUTO_UPDATE_MARKETS_INTERVAL = 10 * 60 * 1000; // 10 minutes
+let refreshId = 0;
+
+export function queueMarketRefresh(type, message, after = () => {}) {
+    return _automationEnqueue(type, () => {
+        const requestId = 'markets:' + Date.now() + ':' + (++refreshId);
+        let done = false;
+        _marketRefreshInProgress = true;
+        function finish() {
+            if (done) return;
+            done = true;
+            safeClearTimeout(watchdog);
+            window.removeEventListener('message', onMessage);
+            _marketRefreshInProgress = false;
+            after();
+            _automationFinish(type);
+        }
+        function onMessage(event) {
+            if (event.source !== window) return;
+            if (event.data?.type === 'COR3_CONNECTION_LOST' || event.data?.type === 'COR3_TOKEN_EXPIRED') finish();
+            if (event.data?.type === 'COR3_ALL_MARKETS_REFRESHED' && event.data.requestId === requestId) finish();
+        }
+        window.addEventListener('message', onMessage);
+        // Cancel in MAIN before releasing ownership; a delayed refresh must not
+        // keep changing endpoints after another automation starts.
+        const watchdog = safeTimeout(() => window.postMessage({ type: 'COR3_STOP_MARKET_REFRESH', requestId }, '*'), 300000);
+        window.postMessage({ ...message, requestId }, '*');
+    });
+}
 
 export function setMarketRefreshInProgress(v) { _marketRefreshInProgress = v; }
 export function setAutoUpdateMarketsLastRefresh(v) { _autoUpdateMarketsLastRefresh = v; }
@@ -51,23 +81,11 @@ try { chrome.storage.sync.get('autoUpdateMarkets', (data) => {
 // Periodic market refresh when Auto Update Markets is enabled
 setInterval(() => {
     if (!_autoUpdateMarkets) return;
+    if (!_initialFetchDone) return;
     if (!isContextValid()) return;
     if (_marketRefreshInProgress || _seqRefreshRunning || _autoJobsActive) return;
     const now = Date.now();
     if (now - _autoUpdateMarketsLastRefresh < _AUTO_UPDATE_MARKETS_INTERVAL) return;
     _autoUpdateMarketsLastRefresh = now;
-    _automationEnqueue('auto-update-markets', () => {
-        _marketRefreshInProgress = true;
-        console.log('[COR3 Helper] Auto Update Markets: triggering periodic 10-min refresh');
-        window.postMessage({ type: 'COR3_REFRESH_ALL_MARKETS_SEQ' }, '*');
-        setTimeout(() => { _marketRefreshInProgress = false; _automationFinish('auto-update-markets'); }, 30000);
-        function onDone(evt) {
-            if (evt.data && evt.data.type === 'COR3_ALL_MARKETS_REFRESHED') {
-                window.removeEventListener('message', onDone);
-                _marketRefreshInProgress = false;
-                _automationFinish('auto-update-markets');
-            }
-        }
-        window.addEventListener('message', onDone);
-    });
+    queueMarketRefresh('auto-update-markets', { type: 'COR3_REFRESH_ALL_MARKETS_SEQ' });
 }, 30000);

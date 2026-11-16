@@ -39,6 +39,7 @@
             --accent-orange: rgba(240, 163, 56, 1);
             --accent-yellow: rgba(255, 200, 87, 1);
             --accent-red: rgba(254, 73, 73, 1);
+            --rarity-super-rare: #818cf8;
             --btn-bg: rgba(33, 52, 59, 1);
             --btn-hover: rgba(65, 149, 168, 1);
             --btn-small-bg: #1d252c;
@@ -867,6 +868,7 @@
         .badge-no { background: var(--border); color: var(--text-dim); }
         .tier-common { border-left: 3px solid #a0a0a0; }
         .tier-rare { border-left: 3px solid var(--accent-cyan); }
+        .tier-super-rare { border-left: 3px solid var(--rarity-super-rare); }
         .tier-epic { border-left: 3px solid var(--accent-purple); }
         .tier-legendary { border-left: 3px solid var(--accent-yellow); }
         .tier-quest { border-left: 3px solid var(--accent-orange); }
@@ -879,6 +881,7 @@
         }
         .tier-tag-common { background: #a0a0a0; color: var(--bg-primary); }
         .tier-tag-rare { background: var(--accent-cyan); color: var(--bg-primary); }
+        .tier-tag-super-rare { background: var(--rarity-super-rare); color: var(--bg-primary); }
         .tier-tag-epic { background: var(--accent-purple); color: var(--bg-primary); }
         .tier-tag-legendary { background: var(--accent-yellow); color: var(--bg-primary); }
         .tier-tag-quest { background: var(--accent-orange); color: var(--bg-primary); }
@@ -2741,6 +2744,18 @@
             color: var(--accent-orange) !important;
             border-color: var(--accent-gray);
         }
+        /* Drone controls reuse mercenary switches, cards, and small buttons. */
+        .drone-number-row { font-size: 10px; margin: 2px 0 6px; }
+        .drone-edit-actions { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: 1px; }
+        .drone-edit-actions .refresh-btn-small { font-size: 9px; }
+        .drone-number-error { color: var(--accent-orange); font-size: 10px; margin-top: 4px; }
+        .drone-number-error:empty { display: none; }
+        .drone-config-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 10px; color: var(--text-muted); }
+        .drone-config-row > label { min-width: 44px; }
+        .drone-config-row select { flex: 1; min-width: 0; width: auto; margin: 0; padding: 3px 6px; font-size: 10px; }
+        .drone-note { color: var(--text-dim); font-size: 10px; line-height: 1.5; margin-bottom: 6px; }
+        .drone-card { cursor: default; }
+        .drone-card:hover { border-color: var(--border); }
         .maint-force-selected-btn.in-progress {
             border-color: var(--accent-orange);
             color: var(--accent-orange);
