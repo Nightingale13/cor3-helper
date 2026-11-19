@@ -11,6 +11,7 @@ let generation = 0;
 let failures = 0;
 let timer = null;
 let fetchController = null;
+let connectionLost = false;
 
 function log(message) {
     return chrome.storage.local.set({ dailyHackLog: message, dailyHackLogUpdatedAt: Date.now() });
@@ -44,14 +45,22 @@ export async function checkAutoDailyHack() {
     try {
         const saved = await chrome.storage.sync.get(['autoDailyHackEnabled', 'helperMode']);
         if (!saved.autoDailyHackEnabled || saved.helperMode || current !== generation) return;
-        const local = await chrome.storage.local.get(['bearerToken', 'dailyHackNextCheckAt']);
+        const local = await chrome.storage.local.get(['bearerToken', 'dailyHackNextCheckAt', 'dailyOpsData', 'dailyHackLog']);
         if (current !== generation) return;
-        if (local.dailyHackNextCheckAt > Date.now()) { schedule(local.dailyHackNextCheckAt); return; }
+        if (local.dailyHackNextCheckAt > Date.now()) {
+            const next = new Date(local.dailyOpsData?.nextTaskTime).getTime();
+            if (local.dailyOpsData?.hasClaimedToday && (!Number.isFinite(next) || next > Date.now()))
+                await log('Daily already completed. Waiting for the next daily task.');
+            else if (/^(Starting daily hack solver|Waiting for the game connection)/.test(local.dailyHackLog || ''))
+                await log('Waiting for the next daily task check.');
+            schedule(local.dailyHackNextCheckAt); return;
+        }
         if (!local.bearerToken) {
             await defer(60, 'Waiting for the game connection before checking the daily task.');
             return;
         }
         fetchController = new AbortController();
+        await log('Checking today’s daily task…');
         const timeout = setTimeout(() => fetchController?.abort(), 15000);
         let data;
         try {
@@ -105,9 +114,15 @@ export function setupAutoDailyHack() {
             defer(300, done.success ? 'Daily hack completed. Waiting for the next daily task.'
                 : 'Daily hack could not finish. Retrying automatically in 5 minutes.');
         } else if (type === 'COR3_INITIAL_FETCH_DONE') {
+            connectionLost = false;
             checkAutoDailyHack();
         } else if (type === 'COR3_TOKEN_EXPIRED' || type === 'COR3_CONNECTION_LOST') {
+            connectionLost = true;
             stop();
+            chrome.storage.sync.get(['autoDailyHackEnabled', 'helperMode']).then(saved => {
+                if (connectionLost && saved.autoDailyHackEnabled && !saved.helperMode)
+                    log('Waiting for the game connection before checking the daily task.');
+            });
         }
     });
     chrome.storage.onChanged.addListener((changes, area) => {

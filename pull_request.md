@@ -28,4 +28,4 @@ This adds automatic drone expeditions and updates mercenary automation to work w
 - [x] Code follows the existing style and uses the existing JavaScript build setup.
 - [x] No unnecessary comments added.
 - [ ] Checked README.md for necessary changes and applied them.
-- [x] Updated manifest.json version to 1.8.0.
+- [x] Updated manifest.json version to 1.8.1.

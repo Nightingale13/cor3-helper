@@ -10,6 +10,8 @@ import './drone.js';
 import './modifiers.js';
 import './pinned-timers.js';
 import './markets.js';
+import './markets-ui.js';
+import './activity-summary.js';
 import './ui-toggles.js';
 import './inventory.js';
 import './loadout.js';
@@ -22,5 +24,6 @@ import './version-info.js';
 import './refresh-all.js';
 import './auto-refresh.js';
 import './storage-listeners.js';
+import './automation-status.js';
 
 console.log('[COR3 Helper] popup modules loaded');

@@ -4,6 +4,7 @@ import { MARKET_DISPLAY_NAMES, JOB_TYPE_PRIORITY, LOG_JOB_TYPES, getMarketNameBy
 import { humanDelay, safeTimeout, safeClearTimeout } from '../shared/ws-utils.js';
 import { formatMinigameLockError, ensureDecryptSolverEnabled, ensureIceWallSolverEnabled, ensureSimpleDecryptSolverEnabled } from '../shared/hack-utils.js';
 import { friendlyError } from '../shared/error-map.js';
+import { logItemName } from '../shared/job-log-format.js';
 import { findHackSoftwareForServerType, findDecryptSoftwareForFileType, findBestSoftwareLoadout, findRemovableSoftware, getServerTypeName, hardwareMatches } from '../shared/loadout-resolver.js';
 import { state, serverMap, sendCmd, delay, waitForEvent, log, SERVER_PRIORITY, SERVER_PATH_MAP } from './state.js';
 
@@ -191,7 +192,7 @@ export async function applyLoadoutChange(loadout, targetHw, targetSwIds) {
 
     for (var ui = 0; ui < currentSw.length; ui++) {
         if (targetSwIds.indexOf(currentSw[ui]) < 0) {
-            log('Loadout: unequipping software: ' + currentSw[ui]);
+            log('Loadout: unequipping software: ' + logItemName(currentSw[ui], loadout.equippedSoftware, 'Unknown software'));
             sendCmd('loadout.unequip.software', { moduleConfigId: currentSw[ui] });
             try { await waitForEvent('COR3_AUTOJOB_LOADOUT', 5000); } catch (e) { /* continue */ }
             await delay(500);
@@ -200,7 +201,7 @@ export async function applyLoadoutChange(loadout, targetHw, targetSwIds) {
 
     for (var ei = 0; ei < targetSwIds.length; ei++) {
         if (currentSw.indexOf(targetSwIds[ei]) < 0) {
-            log('Loadout: equipping software: ' + targetSwIds[ei]);
+            log('Loadout: equipping software: ' + logItemName(targetSwIds[ei], [...(loadout.ownedSoftware || []), ...(loadout.equippedSoftware || [])], 'Unknown software'));
             sendCmd('loadout.equip.software', { moduleConfigId: targetSwIds[ei] });
             try { await waitForEvent('COR3_AUTOJOB_LOADOUT', 5000); } catch (e) { /* continue */ }
             await delay(500);
@@ -220,7 +221,7 @@ export async function ensureLoadoutForJob(job) {
 
     var serverTypeName = getServerTypeName(serverId);
     state._lastLoadoutServerType = serverTypeName || state._lastLoadoutServerType;
-    log('Loadout: pre-check for job "' + (job.type || job.name || '?') + '" on server ' + (serverTypeName || serverId));
+    log('Loadout: pre-check for job "' + (job.type || job.name || '?') + '" on server ' + (serverTypeName || getServerNameById(serverId) || 'Unknown server'));
 
     var serverDefenceRate = 0;
     var needsHack = true;
@@ -391,7 +392,7 @@ export async function tryLoadoutSwapForError(errorMsg, job, errorObj) {
         var serverId = job.serverId;
         var serverTypeName = getServerTypeName(serverId);
         if (!serverTypeName) {
-            log('Loadout: cannot determine server type for ' + serverId, 'warn');
+            log('Loadout: cannot determine server type for ' + (getServerNameById(serverId) || 'Unknown server'), 'warn');
             return false;
         }
         log('Loadout: hack failed on ' + serverTypeName + ' — equipping hack-only software');

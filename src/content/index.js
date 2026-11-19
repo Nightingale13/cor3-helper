@@ -18,7 +18,9 @@ import { setupDrone } from './drone.js';
 import { setupAutoDailyHack } from './daily-hack.js';
 import { setupEngineRelay } from './engine-relay.js';
 import { checkAutoSendOnExpeditionData, stopAutoSend, setupAutoSendRecovery } from './auto-send.js';
+import { setupActivityTracking } from './activity.js';
 
+setupActivityTracking();
 setupWsRelay();
 setupMessageListener();
 setupEngineRelay();

@@ -5,6 +5,7 @@ import { MARKET_SERVER_IDS } from '../shared/server-constants.js';
 import { createSendCmd, createDelay, createWaitForEvent, createLogger } from '../shared/ws-utils.js';
 import { createWaitForHackToBeDone } from '../shared/hack-utils.js';
 import { ServerMap, FALLBACK_PATH_MAP, FALLBACK_SERVER_PRIORITY } from '../shared/server-map.js';
+import { commandProgress, reportProgress } from '../shared/automation-progress.js';
 
 // ---- Mutable solver state ----
 export var state = {
@@ -34,7 +35,12 @@ export var USOL_MARKET_SERVER_ID = MARKET_SERVER_IDS.usol;
 export var serverMap = new ServerMap();
 
 // ---- Wired utilities (bound to solver abortFlag) ----
-export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD', 'auto-jobs');
+const sendJobCommand = createSendCmd('COR3_AUTOJOB_CMD', 'auto-jobs');
+export var sendCmd = function (command, data) {
+    const message = commandProgress(command);
+    if (message) reportProgress('jobs', message, state._currentJobRef);
+    sendJobCommand(command, data);
+};
 export var delay = createDelay(function () { return state.abortFlag; });
 export var waitForEvent = createWaitForEvent(function () { return state.abortFlag; });
 export var log = createLogger('[COR3 Auto-Jobs]', 'COR3_AUTOJOB_LOG');

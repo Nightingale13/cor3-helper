@@ -5,6 +5,8 @@ import { findMaintenanceBlocker } from '../shared/server-map.js';
 import { MARKET_RESET_DURATIONS_MS } from '../shared/server-constants.js';
 import { ensureGameConnection, sendGameMessage } from '../shared/game-connection.js';
 import { isMinigameLocked } from '../shared/job-retry.js';
+import { formatJobLog, rememberJobLogNames } from '../shared/job-log-format.js';
+import { BUILD_ID } from '../shared/build-info.js';
 
 const autoJobSolverToggle = document.getElementById('autoJobSolverToggle');
 const autoJobSolverStatus = document.getElementById('autoJobSolverStatus');
@@ -93,7 +95,7 @@ const AUTO_JOBS_MAX_LOGS = 200;
 let autoJobsTracker = [];
 
 function updateAutoJobSolverStatus(enabled) {
-    autoJobSolverStatus.textContent = enabled ? 'Active' : 'Off';
+    autoJobSolverStatus.textContent = enabled ? 'Shown' : 'Hidden';
     autoJobSolverStatus.style.color = enabled ? 'var(--accent-green)' : 'var(--text-dim)';
     autoJobSolverSection.style.display = enabled ? '' : 'none';
     var card = autoJobSolverSection.closest('.popout-card');
@@ -303,6 +305,7 @@ function updateAutoJobsSelectedTypes(marketKey, container) {
 chrome.storage.sync.get('autoJobsSelectedTypes', (data) => {
     if (data.autoJobsSelectedTypes) {
         autoJobsSelectedTypes = data.autoJobsSelectedTypes;
+        if (autoJobSolverToggle.checked) renderAutoJobsTabs();
     }
 });
 
@@ -342,7 +345,7 @@ copyAllLogsBtn.addEventListener('click', async () => {
     copyAllLogsBtn.title = 'Collecting logs...';
     const MAX_COPY_BYTES = 10 * 1024 * 1024;
     try {
-        const storageKeys = ['autoJobsDebugLogs', 'valuableDebugLogs', 'cor3_errors'];
+        const storageKeys = ['autoJobsDebugLogs', 'valuableDebugLogs', 'cor3_errors', 'droneRepairDiagnostics'];
         const storageData = await chrome.storage.local.get(storageKeys);
 
         const tab = await getCor3Tab();
@@ -425,6 +428,8 @@ copyAllLogsBtn.addEventListener('click', async () => {
         const payload = {
             exportedAt: new Date().toISOString(),
             extensionVersion: chrome.runtime.getManifest().version,
+            helperBuild: BUILD_ID,
+            droneRepairDiagnostics: storageData.droneRepairDiagnostics || null,
             autoJobSolverLogs: mergedAutoJobLogs,
             autoValuableSellerLogs: mergedAutoValuableLogs,
             extensionErrors: mergedErrors,
@@ -790,6 +795,7 @@ function collectAllSupportedJobs(marketData, darkMarketData, soyuzMarketData, us
 }
 
 function addAutoJobLog(msg, level = 'info') {
+    msg = formatJobLog(msg);
     autoJobsDebugLogs.push({ timestamp: new Date().toISOString(), msg, level });
     if (autoJobsDebugLogs.length > AUTO_JOBS_MAX_LOGS) {
         autoJobsDebugLogs.shift();
@@ -813,7 +819,7 @@ export function renderDebugLogs() {
         row.className = 'debug-log-row' + levelClass;
         const displayTime = log.timestamp ? log.timestamp.slice(11, 19) : (log.time || '');
         row.appendChild(_h('span', {className: 'log-time'}, '[' + displayTime + ']'));
-        row.appendChild(document.createTextNode(' ' + log.msg));
+        row.appendChild(document.createTextNode(' ' + formatJobLog(log.msg)));
         frag.appendChild(row);
     }
     debugLogsBody.replaceChildren(frag);
@@ -980,6 +986,7 @@ function createDebugJobRow(job) {
         rewardEl.style.cssText = 'font-size:9px;color:var(--accent-green);white-space:nowrap;';
         const dep = job.reward.deposit ? ` (-${job.reward.deposit})` : '';
         rewardEl.textContent = `💰${job.reward.credits}${dep} ⭐${job.reward.reputation || 0} 🏅${job.reward.renown || 0}`;
+        rewardEl.title = '💰 Credits · ⭐ Market reputation · 🏅 Renown (player XP)';
         row.appendChild(rewardEl);
     }
 
@@ -988,6 +995,10 @@ function createDebugJobRow(job) {
 
 // Listen for auto-job updates from content script via storage changes
 chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'sync' && changes.autoJobsSelectedTypes) {
+        autoJobsSelectedTypes = changes.autoJobsSelectedTypes.newValue || { home: [], dark: [], soyuz: [], usol: [] };
+        if (autoJobSolverToggle.checked) renderAutoJobsTabs();
+    }
     if (area !== 'local') return;
 
     if (changes.autoJobsTracker) {
@@ -1074,7 +1085,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // Restore debug logs from storage on popup open
-chrome.storage.local.get(['autoJobsDebugLogs', 'autoJobsTracker', 'autoJobsRunning'], (data) => {
+chrome.storage.local.get(['autoJobsDebugLogs', 'autoJobsTracker', 'autoJobsRunning', 'loadoutData'], (data) => {
+    rememberJobLogNames(data.loadoutData);
+    rememberJobLogNames(data.autoJobsTracker);
     if (data.autoJobsDebugLogs) {
         autoJobsDebugLogs = data.autoJobsDebugLogs;
         renderDebugLogs();
@@ -1087,5 +1100,14 @@ chrome.storage.local.get(['autoJobsDebugLogs', 'autoJobsTracker', 'autoJobsRunni
         autoJobsRunning = true;
         autoJobsStartBtn.textContent = '■ Stop Auto Jobs';
         autoJobsStartBtn.className = 'auto-jobs-btn-start stop';
+    }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.loadoutData || changes.autoJobsTracker) {
+        rememberJobLogNames(changes.loadoutData?.newValue);
+        rememberJobLogNames(changes.autoJobsTracker?.newValue);
+        renderDebugLogs();
     }
 });

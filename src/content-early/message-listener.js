@@ -1,9 +1,10 @@
 // Message listener: handles postMessage requests from content.js / popup
-import { wsSend, wsSendRaw, leaveRoom, withWsOwner, cancelWsOwner } from './ws-send.js';
+import { wsSend, wsSendRaw, leaveRoom, sendJoin, withWsOwner, cancelWsOwner } from './ws-send.js';
 import { OrigWebSocket, trackedSockets, socketLastActivity, getActiveSocket, setActiveSocket } from './state.js';
 import { findHackSoftwareForServerType, findBestSoftwareLoadout, getServerTypeName, hardwareMatches } from '../shared/loadout-resolver.js';
 import { requestJobMarketRead, cancelJobMarketRead } from './job-markets.js';
 import { cancelRequest } from './request-control.js';
+import { repostGameVersions } from './game-versions.js';
 
 // Periodic socket health check: clean up dead sockets and detect stale connections
 export function installSocketHealthCheck() {
@@ -36,8 +37,12 @@ export function installMessageListener() {
     window.addEventListener('message', function (event) {
         if (event.source !== window) return;
         if (event.data?.type === 'COR3_CANCEL_REQUEST') { cancelRequest(event.data.requestId); return; }
+        if (event.data?.type === 'COR3_SUBSCRIBE_EXPEDITIONS') {
+            sendJoin('expeditions', { urgent: true });
+            return;
+        }
         if (event.data && event.data.type === 'COR3_REQUEST_EXPEDITIONS') {
-            window.__cor3RequestExpeditions(event.data.requestId);
+            window.__cor3RequestExpeditions(event.data.requestId, event.data.urgent === true);
         }
         if (event.data && event.data.type === 'COR3_REQUEST_NETWORK_MAP') {
             window.__cor3AutoJobGetNetworkMap();
@@ -659,7 +664,7 @@ export function installMessageListener() {
         }
         // Decision response from popup
         if (event.data && event.data.type === 'COR3_RESPOND_DECISION') {
-            window.__cor3RespondDecision(event.data.expeditionId, event.data.messageId, event.data.selectedOption);
+            window.__cor3RespondDecision(event.data.expeditionId, event.data.messageId, event.data.selectedOption, event.data.requestId);
         }
         // Archived expeditions request
         if (event.data && event.data.type === 'COR3_REQUEST_ARCHIVED_EXPEDITIONS') {
@@ -925,6 +930,7 @@ export function installMessageListener() {
 // The initial postMessage calls may fire before content.js listener is ready.
 export function scheduleVersionRepost() {
     function repostVersions() {
+        repostGameVersions();
         if (window.__cor3WebVersion) {
             window.postMessage({ type: 'COR3_WEB_VERSION', version: window.__cor3WebVersion }, '*');
         }

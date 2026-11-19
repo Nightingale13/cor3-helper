@@ -14,7 +14,7 @@ let refreshId = 0;
 
 export function queueMarketRefresh(type, message, after = () => {}) {
     return _automationEnqueue(type, () => {
-        const requestId = 'markets:' + Date.now() + ':' + (++refreshId);
+        const requestId = message.requestId || 'markets:' + Date.now() + ':' + (++refreshId);
         let done = false;
         _marketRefreshInProgress = true;
         function finish() {

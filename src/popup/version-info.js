@@ -1,81 +1,76 @@
 import { _safeSetHtml } from './dom-helpers.js';
 import { getCor3Tab } from './utils.js';
+import { RELEASES_URL, compareExtensionVersions, checkExtensionRelease } from '../shared/extension-updates.js';
 
-const RELEASES_URL = 'https://github.com/Nightingale13/cor3-helper/releases';
-const LATEST_RELEASE_API = 'https://api.github.com/repos/Nightingale13/cor3-helper/releases/latest';
 const checkUpdateBtn = document.getElementById('checkUpdateBtn');
 const updateResult = document.getElementById('updateResult');
+let latestCheckAt = 0;
 
-function compareVersions(local, remote) {
-    const a = local.split('.').map(Number), b = remote.split('.').map(Number);
-    for (let i = 0; i < 3; i++) {
-        if (a[i] < b[i]) return -1;
-        if (a[i] > b[i]) return 1;
+function renderReleaseCheck(result) {
+    if (!result) return;
+    // The initial cached read can finish after a live background update.
+    // Keep the latest actual check visible in that case.
+    const checkedAt = Number(result.checkedAt) || 0;
+    if (checkedAt < latestCheckAt) return;
+    latestCheckAt = checkedAt;
+    updateResult.style.color = 'var(--text-secondary)';
+    if (result.status === 'none') {
+        _safeSetHtml(updateResult, `No public stable release is available for this fork. <a href="${RELEASES_URL}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">View releases</a>`);
+    } else if (result.status === 'error') {
+        updateResult.textContent = result.message;
+        updateResult.style.color = 'var(--accent-red)';
+    } else if (result.status === 'ok') {
+        const local = chrome.runtime.getManifest().version;
+        const comparison = compareExtensionVersions(local, result.version);
+        if (comparison < 0) {
+            const url = `${RELEASES_URL}/tag/${encodeURIComponent(result.tag)}`;
+            _safeSetHtml(updateResult, `Extension update available: <b>v${local}</b> → <b>v${result.version}</b><br><a href="${url}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Download release from GitHub</a><span class="update-instructions">Download dist.zip, extract, and reload the extension on chrome://extensions.</span>`);
+            updateResult.style.color = 'var(--accent-orange)';
+        } else {
+            updateResult.textContent = comparison === 0 ? `You're up to date (v${local}).`
+                : `Installed v${local}; latest published release is v${result.version}.`;
+            updateResult.style.color = comparison === 0 ? 'var(--accent-green)' : 'var(--text-secondary)';
+        }
     }
-    return 0;
+    const checkType = ['automatic', 'manual'].includes(result.checkType) ? ' (' + result.checkType + ')' : '';
+    const lastChecked = checkedAt ? 'Last checked: ' + new Date(checkedAt).toLocaleString() + checkType : '';
+    updateResult.title = lastChecked;
+    const info = document.getElementById('updateCheckInfo');
+    if (info) info.textContent = 'Checks automatically every 24 hours.' + (lastChecked ? ' ' + lastChecked : '');
 }
 
 checkUpdateBtn.addEventListener('click', async () => {
     if (checkUpdateBtn.disabled) return;
     checkUpdateBtn.disabled = true;
     updateResult.textContent = 'Checking GitHub releases…';
-    updateResult.style.color = 'var(--text-dim)';
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    try {
-        const response = await fetch(LATEST_RELEASE_API, { cache: 'no-store', signal: controller.signal,
-            headers: { Accept: 'application/vnd.github+json' } });
-        if (response.status === 404) {
-            _safeSetHtml(updateResult, `No public stable release is available for this fork. <a href="${RELEASES_URL}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">View releases</a>`);
-            return;
-        }
-        if (response.status === 403 || response.status === 429)
-            throw new Error('GitHub limited the update check. Try again later.');
-        if (!response.ok) throw new Error('Could not check GitHub releases. Try again later.');
-        const release = await response.json();
-        const match = typeof release.tag_name === 'string' && release.tag_name.match(/^v?(\d+\.\d+\.\d+)$/);
-        if (!match || release.draft || release.prerelease)
-            throw new Error('The latest release does not have a supported stable version tag.');
-        const remoteVersion = match[1];
-        const localVersion = chrome.runtime.getManifest().version;
-        const comparison = compareVersions(localVersion, remoteVersion);
-        if (comparison < 0) {
-            const releaseUrl = `${RELEASES_URL}/tag/${encodeURIComponent(release.tag_name)}`;
-            _safeSetHtml(updateResult, `Extension update available: <b>v${localVersion}</b> → <b>v${remoteVersion}</b><br><a href="${releaseUrl}" target="_blank" rel="noopener noreferrer" style="color:var(--accent-cyan);">Download release from GitHub</a><br><span style="font-size:9px;color:var(--text-muted);">Download dist.zip, extract, and reload the extension on chrome://extensions.</span>`);
-            updateResult.style.color = 'var(--accent-orange)';
-        } else {
-            updateResult.textContent = comparison === 0 ? `You're up to date (v${localVersion}).`
-                : `Installed v${localVersion}; latest published release is v${remoteVersion}.`;
-            updateResult.style.color = comparison === 0 ? 'var(--accent-green)' : 'var(--text-dim)';
-        }
-    } catch (error) {
-        console.log('[COR3 Helper] Check for updates error:', error);
-        cor3LogError('popup.js', error, { action: 'checkForUpdates' });
-        updateResult.textContent = error.name === 'AbortError' ? 'GitHub update check timed out. Try again.' : error.message;
-        updateResult.style.color = 'var(--accent-red)';
-    } finally {
-        clearTimeout(timeout);
-        checkUpdateBtn.disabled = false;
+    try { renderReleaseCheck(await checkExtensionRelease(true)); }
+    catch (error) {
+        updateResult.textContent = 'Could not complete the update check. Try again.';
+        updateResult.style.color = 'var(--accent-orange)';
     }
+    finally { checkUpdateBtn.disabled = false; }
 });
+chrome.storage.local.get('extensionReleaseCheck').then(data => renderReleaseCheck(data.extensionReleaseCheck));
 
 async function displayVersionInfo(retryCount) {
     retryCount = retryCount || 0;
     const versionSection = document.getElementById('versionInfoSection');
     if (!versionSection) return;
     const extVersion = chrome.runtime.getManifest().version;
-    const { webVersion, systemVersion, patchVersion } = await chrome.storage.local.get(['webVersion', 'systemVersion', 'patchVersion']);
+    const { webVersion, systemVersion, patchVersion, gameVersionSession } = await chrome.storage.local.get(['webVersion', 'systemVersion', 'patchVersion', 'gameVersionSession']);
+    let session = gameVersionSession;
 
     let finalWebVersion = webVersion;
     let finalSystemVersion = systemVersion;
     let finalPatchVersion = patchVersion;
 
-    if (!webVersion || !systemVersion || !patchVersion) {
+    {
         try {
             const tab = await getCor3Tab();
             if (tab) {
                 const response = await chrome.tabs.sendMessage(tab.id, { action: "getVersionFallbacks" });
                 if (response) {
+                    session = response.gameVersionSession || session;
                     if (!finalWebVersion && response.webVersion) {
                         finalWebVersion = response.webVersion;
                         chrome.storage.local.set({ webVersion: response.webVersion });
@@ -95,11 +90,20 @@ async function displayVersionInfo(retryCount) {
         }
     }
 
+    if (session) {
+        finalWebVersion = session.current.web ?? finalWebVersion;
+        finalSystemVersion = session.current.system ?? finalSystemVersion;
+        finalPatchVersion = session.current.patch ?? finalPatchVersion;
+    }
     let parts = [`Extension: v${extVersion}`];
     if (finalWebVersion) parts.push(`Game web: ${finalWebVersion}`);
     if (finalSystemVersion) parts.push(`System: ${finalSystemVersion}`);
     if (finalPatchVersion) parts.push(`Patch: ${finalPatchVersion}`);
-    versionSection.textContent = parts.join(' · ');
+    const changes = session ? Object.entries(session.current).filter(([kind, value]) => session.initial[kind] !== value)
+        .map(([kind, value]) => `${{ web: 'Game web', system: 'System', patch: 'Patch' }[kind]}: ${session.initial[kind]} → ${value}`) : [];
+    versionSection.textContent = parts.join(' · ') + (changes.length ? '\nChanged since opening: ' + changes.join(' · ') : '');
+    versionSection.style.whiteSpace = 'pre-line';
+    versionSection.title = 'Game web: the loaded game website. System: the systemVersion reported for your game account. Patch: the patch selected in the game updater. Values update when the game reports them; they are not a check for new helper releases.';
     versionSection.style.display = 'block';
 
     if ((!finalWebVersion || !finalSystemVersion || !finalPatchVersion) && retryCount < 5) {
@@ -110,5 +114,6 @@ displayVersionInfo(0);
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.webVersion || changes.systemVersion || changes.patchVersion) displayVersionInfo();
+    if (changes.extensionReleaseCheck) renderReleaseCheck(changes.extensionReleaseCheck.newValue);
+    if (changes.webVersion || changes.systemVersion || changes.patchVersion || changes.gameVersionSession) displayVersionInfo();
 });

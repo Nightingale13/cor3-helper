@@ -1,12 +1,7 @@
-import { isGameUrl } from '../shared/game-connection.js';
+import { getGameTab } from '../shared/game-tabs.js';
 
 export async function getCor3Tab() {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab && isGameUrl(activeTab.url)) {
-        return activeTab;
-    }
-    const allTabs = await chrome.tabs.query({ url: ['https://cor3.gg/*', 'https://os.cor3.gg/*'] });
-    return allTabs.length > 0 ? allTabs[0] : null;
+    return getGameTab();
 }
 
 export function formatTimeAgo(ts) {

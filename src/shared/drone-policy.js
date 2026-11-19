@@ -1,8 +1,9 @@
 import { droneChargeSeconds } from './drone-battery.js';
+import { DRONE_AVAILABILITY_CHECK_MS } from './drone-availability.js';
 
 export const DRONE_DEFAULTS = {
-    enabled: true, paused: false, autoChooseMission: true, locationConfigId: '', missionConfigId: '',
-    autoRepair: true, repairThreshold: 20, repairTarget: 60, repairWhileCharging: true, fullCharge: false
+    enabled: false, paused: false, autoChooseMission: true, locationConfigId: '', missionConfigId: '',
+    autoRepair: true, repairThreshold: 20, repairTarget: 60, repairWhileCharging: true, fullCharge: false, keepCreditReserve: true
 };
 
 export function droneSettings(settings) {
@@ -10,12 +11,42 @@ export function droneSettings(settings) {
 }
 
 export function isDroneAlreadyFullyRepaired(error) {
-    return /^(?:Drone automation paused:\s*)?Drone durability is already full[.!]?$/i.test(error?.message?.trim() || '');
+    return /^Drone durability is already full[.!]?$/i.test(repairErrorMessage(error));
+}
+
+function repairErrorMessage(error) {
+    return (error?.message || '').trim().replace(/^(?:(?:Drone automation paused|Something went wrong):\s*)+/i, '');
 }
 
 export function isDroneRepairStateConflict(error) {
     return isDroneAlreadyFullyRepaired(error) ||
-        /^(?:Drone automation paused:\s*)?Repair target must be above current durability[.!]?$/i.test(error?.message?.trim() || '');
+        /^Repair target must be above current durability[.!]?$/i.test(repairErrorMessage(error));
+}
+
+export function matchesRejectedDroneRepair(options, rejected) {
+    return !!rejected && !!options?.drone && !options.activeMissionId && !options.drone.isRepairing &&
+        // Idle durability cannot fall without another mission. A different
+        // stale reading must not allow the same rejected repair to run again.
+        options.drone.id === rejected.droneId &&
+        options.drone.durability < options.drone.maxDurability &&
+        options.drone.maxDurability === rejected.maxDurability;
+}
+
+export function awaitingConfirmedDroneRepair(options, repair) {
+    const drone = options?.drone;
+    return !!repair?.confirmed && !!drone && drone.id === repair.droneId &&
+        !options.activeMissionId && !drone.isDestroyed && !drone.isRepairing &&
+        (!Number.isFinite(repair.maxDurability) || repair.maxDurability === drone.maxDurability) &&
+        Number.isFinite(drone.durability) && drone.durability < repair.targetDurability;
+}
+
+export function droneOptionsAfterUpdate(options, update) {
+    const drone = options?.drone;
+    if (!drone || update?.missionId || !Number.isFinite(update?.durability) || update.durability < 0 ||
+        !Number.isFinite(drone.maxDurability) || update.durability > drone.maxDurability ||
+        (update.droneId && update.droneId !== drone.id)) return null;
+    return { ...options, drone: { ...drone, durability: update.durability, isRepairing: false,
+        repairSecondsRemaining: null, repair: null } };
 }
 
 export function pickDroneMission(options, settings) {
@@ -56,10 +87,13 @@ export function chargingRepairPlan(options, chargingSeconds, availableCredits) {
 
 export function dronePlan(options, settings, availableCredits) {
     const drone = options?.drone;
-    if (!drone) return { type: 'pause', message: 'Personal drone is not available.' };
+    if (!drone) return { type: 'wait', phase: 'unlock', seconds: DRONE_AVAILABILITY_CHECK_MS / 1000,
+        message: 'Waiting for a drone. Unlock it in the game to use drone automation.' };
     if (drone.isDestroyed) return { type: 'pause', message: 'Drone destroyed. Restore or replace it in game before resuming.' };
     if (drone.isRepairing) return { type: 'wait', message: 'Repair in progress.', seconds: drone.repair?.secondsRemaining ?? drone.repairSecondsRemaining };
     if (options.activeMissionId) return { type: 'active', missionId: options.activeMissionId };
+    const spendableCredits = settings.keepCreditReserve === true
+        ? Number.isFinite(availableCredits) ? Math.max(0, availableCredits - 2000) : 0 : availableCredits;
     if (!Number.isFinite(drone.durability) || !Number.isFinite(drone.maxDurability) || drone.maxDurability <= 0 ||
         drone.durability < 0 || drone.durability > drone.maxDurability) {
         return { type: 'wait', phase: 'retry', seconds: 60, message: 'Waiting for current drone durability. Retrying automatically.' };
@@ -79,6 +113,10 @@ export function dronePlan(options, settings, availableCredits) {
         }
         normalRepair = { type: 'repair', targetDurability, cost: points * options.repairRate.creditsPerPoint,
             seconds: points * options.repairRate.secondsPerPoint };
+        if (settings.keepCreditReserve === true && normalRepair.cost > spendableCredits) {
+            return { type: 'wait', phase: 'credits', seconds: 60,
+                message: 'Waiting for enough credits to repair the drone and keep 2,000 for jobs.' };
+        }
     }
     const repairRequired = needsNormalRepair && !normalRepair
         ? { type: 'pause', message: 'Durability reached the repair threshold. Repair in game or enable automatic repair.' } : null;
@@ -93,7 +131,7 @@ export function dronePlan(options, settings, availableCredits) {
     if (battery.current < needed) {
         const seconds = droneChargeSeconds(battery, needed);
         if (settings.repairWhileCharging) {
-            const repair = chargingRepairPlan(options, seconds, availableCredits);
+            const repair = chargingRepairPlan(options, seconds, spendableCredits);
             if (repair && (!normalRepair || repair.targetDurability >= normalRepair.targetDurability)) return { ...repair, mission };
         }
         if (normalRepair || repairRequired) return normalRepair || repairRequired;

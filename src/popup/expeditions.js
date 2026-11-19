@@ -20,6 +20,7 @@ let savedLootMod = 1;
 let savedRiskMod = -5;
 let cachedDroneDecision = null;
 let cachedDroneDecisionError = null;
+let expeditionRenderId = 0;
 
 decisionsSectionToggle.addEventListener('click', () => {
     decisionsSectionToggle.classList.toggle('open');
@@ -329,58 +330,20 @@ export function renderDecisions(decisions) {
     }
 }
 
-const autoChosenDecisions = new Set();
-var counter = 0;
 export async function checkAutoChoose(decisions) {
-    const saved = await chrome.storage.sync.get(['helperMode', 'decisionModifiers']);
-    if (state.isHelper || saved.helperMode || saved.decisionModifiers?.autoChoose === false) return;
-    const autoChoose = document.getElementById('autoChooseCheckbox');
-    if (!autoChoose || !autoChoose.checked) return;
     if (!decisions || decisions.length === 0) return;
-
-    for (const d of decisions) {
-        if (d.isResolved || !d.decisionDeadline || !Array.isArray(d.decisionOptions)) continue;
-        if (autoChosenDecisions.has(d.messageId)) continue;
-        const dl = new Date(d.decisionDeadline);
-        const remaining = dl - Date.now();
-        chrome.storage.local.set({ popupConsoleLog: "remaining time for decision -> " + remaining + " Counter: " + counter });
-        if (remaining <= 0) continue;
-        const noWaitCb = document.getElementById('noWaitAutoChooseCheckbox');
-        const noWait = noWaitCb && noWaitCb.checked;
-        if (!noWait && remaining > 60000) continue;
-
-                const vetOverride = d._kind !== 'drone' && isVeteranExpedition(d.expeditionId);
-        let bestOpt = null;
-        let bestScore = -Infinity;
-        for (const opt of d.decisionOptions) {
-            const score = calcOptionScore(opt, d.riskScore, vetOverride);
-            if (score > bestScore) {
-                bestScore = score;
-                bestOpt = opt;
-            }
-        }
-        if (bestOpt) {
-            autoChosenDecisions.add(d.messageId);
-            try {
-                const tab = await getCor3Tab();
-                if (tab) {
-                    await chrome.tabs.sendMessage(tab.id, {
-                        action: 'respondDecision',
-                        expeditionId: d.expeditionId,
-                        messageId: d.messageId,
-                        selectedOption: bestOpt.id
-                    });
-                    console.log(`[COR3 Helper] Auto-chose "${bestOpt.label}" (score: ${bestScore})`);
-                }
-            } catch (e) { /* silent */ }
-        }
-    }
+    try {
+        const tab = await getCor3Tab();
+        if (tab) await chrome.tabs.sendMessage(tab.id, { action: 'checkMercenaryDecisions' });
+    } catch { /* The game tab may be reloading. */ }
 }
 
 export async function loadExpeditions() {
+    const renderId = ++expeditionRenderId;
     const { expeditionsData, expeditionDecisions, droneData, droneMissionData, droneEvents, droneRetiredEvents, droneMissionEventsUpdatedAt, droneDecisionError } = await chrome.storage.local.get([
         'expeditionsData', 'expeditionDecisions', 'droneData', 'droneMissionData', 'droneEvents', 'droneRetiredEvents', 'droneMissionEventsUpdatedAt', 'droneDecisionError'
     ]);
+    if (renderId !== expeditionRenderId) return;
     cachedDroneDecision = currentDroneDecision(droneData, droneMissionData, droneEvents, droneRetiredEvents, droneMissionEventsUpdatedAt);
     cachedDroneDecisionError = droneDecisionError;
     renderExpeditionInfo(expeditionsData || [], droneData, droneMissionData);

@@ -23,7 +23,7 @@ let valuableDebugLogs = [];
 const VALUABLE_MAX_LOGS = 200;
 
 function updateValuableStatus(enabled) {
-    valuableStatus.textContent = enabled ? 'Active' : 'Off';
+    valuableStatus.textContent = enabled ? 'Shown' : 'Hidden';
     valuableStatus.style.color = enabled ? 'var(--accent-green)' : 'var(--text-dim)';
     valuableSection.style.display = enabled ? '' : 'none';
     var card = valuableSection.closest('.popout-card');

@@ -9,13 +9,17 @@ import { marketRouteBlocker } from '../shared/market-reachability.js';
 import { handleDroneMessage } from './drone.js';
 import { relayJobMarketRead } from './job-markets.js';
 import { takeResponse } from './request-tracker.js';
-import { queueRetryOp, humanDelay } from './ws-send.js';
+import { queueRetryOp, humanDelay, noteServerRateLimit } from './ws-send.js';
+import { isRateLimitError } from '../shared/automation-recovery.js';
+import { recordGameVersion } from './game-versions.js';
+import { mercenaryDecisions } from '../shared/mercenary-decisions.js';
 
 // Forward declaration — set by index.js after market-requests is loaded
 let __cor3PostUnreachable = null;
 export function setPostUnreachable(fn) { __cor3PostUnreachable = fn; }
 
 export function handleWsMessage(rawData, socket) {
+    if (window.__cor3AutomationOwner === false) return;
     if (typeof rawData !== 'string') return;
 
     // Log ALL inbound WS messages to content.js for storage (not just 42-prefixed)
@@ -36,6 +40,8 @@ export function handleWsMessage(rawData, socket) {
 
     const eventName = parsed[0];
     const payload = parsed[1];
+    // Set the shared pause before response callbacks can enqueue another action.
+    if (isRateLimitError(payload?.error) || (eventName === 'error' && isRateLimitError(payload))) noteServerRateLimit();
     const outbound = takeResponse(socket, eventName, payload);
     const automationReply = outbound?.source === 'helper' && !outbound.ambiguous;
     // Untagged errors cannot be assigned safely when the user interleaves the
@@ -46,6 +52,13 @@ export function handleWsMessage(rawData, socket) {
         return;
     }
     if (handleDroneMessage(eventName, payload, outbound)) return;
+    if (eventName === 'expeditions' && payload?.event?.action === 'respond.event') {
+        if (automationReply && outbound.requestId) {
+            window.postMessage({ type: 'COR3_WS_DECISION_RESULT', requestId: outbound.requestId,
+                data: payload.data, error: payload.error || null }, '*');
+        }
+        return;
+    }
 
     // Handle token-expired error — close sockets to force game to reconnect with fresh token
     if (eventName === 'error' && payload && payload.message === 'token-expired') {
@@ -359,7 +372,7 @@ export function handleWsMessage(rawData, socket) {
         }
 
         // get.jobs: merge jobs into cached market data
-        if (mktAction === 'get.jobs' && outbound?.marketId && !outbound.ambiguous) {
+        if (mktAction === 'get.jobs' && !payload.error && Array.isArray(payload.data.jobs) && outbound?.marketId && !outbound.ambiguous) {
             var jobsMarketId = outbound.marketId;
             var jobsType = resolveMarketType(jobsMarketId);
             var jobsCacheKey = marketCacheKey(jobsType);
@@ -368,8 +381,10 @@ export function handleWsMessage(rawData, socket) {
                 window[jobsCacheKey].recentJobs = payload.data.recentJobs || [];
                 window[jobsCacheKey].nextJobsResetAt = payload.data.nextJobsResetAt || window[jobsCacheKey].nextJobsResetAt;
                 postMarketUpdate(jobsType, window[jobsCacheKey]);
+                window.postMessage({ type: 'COR3_MARKET_JOBS_UPDATED', marketType: jobsType }, '*');
                 // Signal that this market's data is fully loaded
-                if (automationReply) window.postMessage({ type: 'COR3_MARKET_FETCH_COMPLETE', marketId: jobsMarketId, marketType: jobsType }, '*');
+                if (automationReply) window.postMessage({ type: 'COR3_MARKET_FETCH_COMPLETE', marketId: jobsMarketId,
+                    marketType: jobsType, requestId: outbound?.requestId }, '*');
             }
         }
 
@@ -386,8 +401,7 @@ export function handleWsMessage(rawData, socket) {
         var sv = payload.data.selectedVersion;
         if (sv) {
             console.log('[COR3 Helper] Captured patch version from updater:', sv);
-            window.__cor3PatchVersion = sv;
-            window.postMessage({ type: 'COR3_PATCH_VERSION', version: sv }, '*');
+            recordGameVersion('patch', sv);
         }
     }
 
@@ -640,15 +654,8 @@ export function handleWsMessage(rawData, socket) {
         }
     }
 
-    // Handle expedition update events for listening-based updates
-    if (eventName === 'expeditions' && payload && payload.event && payload.event.action === 'update') {
-        // Updates are not a full active-slot snapshot. Read the current state.
-        window.__cor3RequestExpeditions?.();
-        return;
-    }
-
     // We're interested in "expeditions" responses that contain expedition data
-    if (eventName === 'expeditions' && payload && payload.data) {
+    if (eventName === 'expeditions' && payload && !payload.error) {
         // Handle archived expeditions response
         if (payload.event && payload.event.action === 'get.archived') {
             window.postMessage({
@@ -665,8 +672,17 @@ export function handleWsMessage(rawData, socket) {
             return;
         }
 
-        if (expAction !== 'get.active' || !Array.isArray(payload.data) ||
-            !payload.data.every(expedition => expedition?.id && expedition.status)) return;
+        if (expAction !== 'get.active') {
+            // Pushes can contain a single expedition or a single message. They
+            // must never replace the complete active-slot snapshot used to launch mercs.
+            const update = payload.data?.expedition || payload.data;
+            const expeditions = Array.isArray(update) ? update : update?.id && Array.isArray(update.messages) ? [update] : [];
+            if (expAction === 'update' || expeditions.some(exp => Array.isArray(exp?.messages)) || update?.expeditionId) {
+                window.postMessage({ type: 'COR3_WS_EXPEDITION_UPDATE', data: payload.data }, '*');
+            }
+            return;
+        }
+        if (!Array.isArray(payload.data) || !payload.data.every(expedition => expedition?.id && expedition.status)) return;
         const expeditions = payload.data;
 
         // Relay full expedition data for expedition info display
@@ -675,39 +691,6 @@ export function handleWsMessage(rawData, socket) {
             expeditions: expeditions, requestId: outbound?.requestId
         }, '*');
 
-        const decisionsFound = [];
-
-        for (const expedition of expeditions) {
-            if (!expedition.messages) continue;
-
-            for (const msg of expedition.messages) {
-                if (msg.decisionOptions && msg.decisionOptions !== null) {
-                    decisionsFound.push({
-                        expeditionId: expedition.id,
-                        mercenaryCallsign: expedition.mercenary
-                            ? expedition.mercenary.callsign
-                            : 'Unknown',
-                        locationName: expedition.locationName || '',
-                        zoneName: expedition.zoneName || '',
-                        riskScore: expedition.riskScore || 0,
-                        messageId: msg.id,
-                        content: msg.content,
-                        decisionOptions: msg.decisionOptions,
-                        selectedOption: msg.selectedOption,
-                        decisionDeadline: msg.decisionDeadline,
-                        isResolved: msg.isResolved,
-                        isAutoResolved: msg.isAutoResolved || false,
-                        createdAt: msg.createdAt
-                    });
-                }
-            }
-        }
-
-        if (decisionsFound.length > 0) {
-            window.postMessage({
-                type: 'COR3_WS_DECISIONS',
-                decisions: decisionsFound
-            }, '*');
-        }
+        window.postMessage({ type: 'COR3_WS_DECISIONS', decisions: mercenaryDecisions(expeditions) }, '*');
     }
 }

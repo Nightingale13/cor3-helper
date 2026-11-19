@@ -392,11 +392,11 @@ export async function stepTakeJob(job) {
         if (evt.data && evt.data.type === 'COR3_AUTOJOB_DESKTOP_FILE' && evt.data.data && evt.data.data.file) {
             var fileData = evt.data.data.file;
             capturedFileInfo = fileData;
-            log('Captured file info: ' + fileData.name + ' (id: ' + fileData.id + ')');
+            log('Captured file info: ' + (fileData.name || 'Unknown file'));
             var fId = fileData.folderId;
             if (fId) {
                 state.downloadFolderId = fId;
-                log('Captured download folder ID: ' + fId);
+                log('Located the job download folder');
             }
         }
     };
@@ -408,14 +408,17 @@ export async function stepTakeJob(job) {
         if (result.error) {
             window.removeEventListener('message', depositHandler);
             window.removeEventListener('message', fileHandler);
-            throw new Error('Job take error: ' + friendlyError(result.error.message || JSON.stringify(result.error)));
+            throw Object.assign(new Error('Job take error: ' + friendlyError(result.error.message || JSON.stringify(result.error))),
+                { code: result.error.code });
         }
     } catch (e) {
         window.removeEventListener('message', depositHandler);
         window.removeEventListener('message', fileHandler);
-        throw new Error('Failed to take job: ' + e.message);
+        throw Object.assign(new Error('Failed to take job: ' + e.message), { code: e.code });
     }
     window.removeEventListener('message', depositHandler);
+    // Acceptance is confirmed even if a later conditions refresh fails.
+    job.alreadyTaken = true;
 
     if (depositPaid > 0) {
         job.depositPaid = depositPaid;
@@ -533,7 +536,7 @@ export async function stepDiscoverDownloadFolder() {
 
     if (window.__cor3DownloadFolderId) {
         state.downloadFolderId = window.__cor3DownloadFolderId;
-        log('Using cached Downloads folder ID: ' + state.downloadFolderId);
+        log('Using the cached Downloads folder');
         return state.downloadFolderId;
     }
 
@@ -542,7 +545,7 @@ export async function stepDiscoverDownloadFolder() {
         await delay(500);
         if (window.__cor3DownloadFolderId) {
             state.downloadFolderId = window.__cor3DownloadFolderId;
-            log('Got Downloads folder ID from polling: ' + state.downloadFolderId);
+            log('Located the Downloads folder from the game update');
             return state.downloadFolderId;
         }
     }
@@ -571,7 +574,7 @@ export async function stepDiscoverDownloadFolder() {
 
     if (!result && window.__cor3DownloadFolderId) {
         state.downloadFolderId = window.__cor3DownloadFolderId;
-        log('Got Downloads folder ID from global after WS attempt: ' + state.downloadFolderId);
+        log('Located the Downloads folder from the game cache');
         return state.downloadFolderId;
     }
 
@@ -581,7 +584,7 @@ export async function stepDiscoverDownloadFolder() {
             var dlFolder = result.folders.find(function (f) { return f.name === 'Downloads'; });
             if (dlFolder) {
                 state.downloadFolderId = dlFolder.id;
-                log('Discovered Downloads folder ID: ' + dlFolder.id);
+                log('Located the Downloads folder');
                 return dlFolder.id;
             }
             log('No "Downloads" folder found in: ' + result.folders.map(function(f) { return f.name; }).join(', '), 'warn');

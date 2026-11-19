@@ -19,7 +19,8 @@ const notesPath = path.join(root, 'release_notes.md');
 // Notes and tests stay local; a clean GitHub checkout does not include them.
 if (fs.existsSync(notesPath)) {
     const notes = fs.readFileSync(notesPath, 'utf8');
-    assert.ok(notes.startsWith(`# COR3 Helper ${pkg.version}\n`) || notes.startsWith(`# COR3 Helper ${pkg.version}\r\n`),
+    const headingVersion = notes.split(/\r?\n/, 1)[0].match(/^# COR3 Helper (\d+\.\d+\.\d+)(?:[ \t].*)?$/)?.[1];
+    assert.equal(headingVersion, pkg.version,
         'Release notes heading does not match the extension version');
 }
 const manifest = readJson('dist/manifest.json');

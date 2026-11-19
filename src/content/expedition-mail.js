@@ -81,8 +81,53 @@ export function collectExpeditionMail(options) {
     return collectRewardMail({ ...options, source: 'EXPEDITION' });
 }
 
+const rewardWrites = new Map();
+function updateRewardState(source, update) {
+    const key = 'rewardMailState:' + source;
+    const write = (rewardWrites.get(source) || Promise.resolve()).then(async () => {
+        const local = await chrome.storage.local.get(key);
+        const next = update(local[key] || {});
+        await chrome.storage.local.set({ [key]: next });
+        return next;
+    });
+    rewardWrites.set(source, write.catch(() => {}));
+    return write;
+}
+
+// Persist before finalizing the expedition: the server may deliver its mail
+// even if the finalization reply is lost or the browser closes.
+export function noteRewardCompletion(source, id) {
+    if (!id) return Promise.resolve();
+    return updateRewardState(source, state => ({ ...state,
+        pending: [...new Set([...(state.pending || []), ...((state.completed || []).includes(id) ? [] : [id])])] }));
+}
+
+export async function hasRewardMailToCollect(source, allowInitialCheck = true) {
+    const key = 'rewardMailState:' + source;
+    await rewardWrites.get(source);
+    const local = await chrome.storage.local.get([key, 'mailData']);
+    const state = local[key] || {};
+    const knownMail = pendingRewardMessages(local.mailData, source).some(message => !(state.mailIds || []).includes(message.id));
+    return !!(state.collecting || state.pending?.length || knownMail || (allowInitialCheck && !state.checked));
+}
+
+// An empty mailbox is not a reason to keep polling it. Reopen collection only
+// for a new completion, known unclaimed mail, or the first idle recovery check.
+export async function collectPendingRewardMail({ source, signal, freeSpace, allowInitialCheck = true }) {
+    if (!await hasRewardMailToCollect(source, allowInitialCheck)) return false;
+    const state = await updateRewardState(source, current => ({ ...current, collecting: true }));
+    const pending = state.pending || [];
+    const mailIds = await collectRewardMail({ source, signal, freeSpace });
+    await updateRewardState(source, current => ({ ...current, checked: true, collecting: false,
+        pending: (current.pending || []).filter(id => !pending.includes(id)),
+        completed: [...new Set([...(current.completed || []), ...pending])].slice(-100),
+        mailIds: [...new Set([...(current.mailIds || []), ...mailIds])].slice(-500) }));
+    return true;
+}
+
 export async function collectRewardMail({ signal, freeSpace, source }) {
     const confirmed = new Set();
+    const collectedMessages = new Set();
     const capacityRetries = new Map();
     const capacityRefreshes = new Set();
     let mail = await requestMail(signal);
@@ -92,7 +137,7 @@ export async function collectRewardMail({ signal, freeSpace, source }) {
         if (!message) {
             await requestStash(signal);
             console.log('[COR3 Helper] Reward mailbox collected; inventory refreshed:', source);
-            return;
+            return [...collectedMessages];
         }
         const attachments = message.attachments.filter(a => !a.claimedAt && !confirmed.has(a.id));
         const ids = new Set(attachments.map(a => a.id));
@@ -107,7 +152,7 @@ export async function collectRewardMail({ signal, freeSpace, source }) {
         }
         const remaining = attachments.filter(a => !confirmed.has(a.id));
         if (!reply.error && remaining.length === 0) {
-            mail = await requestMail(signal);
+            collectedMessages.add(message.id);
             continue;
         }
 
@@ -115,7 +160,7 @@ export async function collectRewardMail({ signal, freeSpace, source }) {
         const failure = reply.error || results.find(r => !['claimed', 'already_claimed', 'already-claimed'].includes(r.status));
         mail = await requestMail(signal);
         const stillPending = pendingRewardMessages(mail, source, confirmed).find(m => m.id === message.id);
-        if (!stillPending) continue;
+        if (!stillPending) { collectedMessages.add(message.id); continue; }
         const capacity = isMailCapacityError(failure) || isMailCapacityError(failure?.error) ||
             isMailCapacityError(failure?.reason) || isMailCapacityError(failure?.status);
         if (['not-found', 'not_found'].includes(failure?.status)) {

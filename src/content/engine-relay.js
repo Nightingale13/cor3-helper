@@ -5,11 +5,17 @@ import { setMarketRefreshInProgress, setAutoJobsActive } from './auto-update-mar
 import { setInitialFetchDone, setAutoSendInProgress, setAutoSendAwaitingMercenaries, setAutoSendAwaitingUsolMercs, setAutoSendDeferredWaiting, setAutoSendUsolSkipped, setAutoSendMercRetryCount, autoSendInProgress, checkAutoSendOnExpeditionData } from './auto-send.js';
 import { injectDecryptSolver, injectIceWallSolver, injectSimpleDecryptSolver } from './solvers.js';
 import { queueAutoJobLog, queueValuableLog } from './log-writers.js';
+import { waitForMarketWrites } from './ws-relay.js';
+import { saveProgress } from './progress.js';
 
 export function setupEngineRelay() {
     window.addEventListener('message', (event) => {
         if (event.source !== window) return;
         if (!isContextValid()) return;
+        if (event.data?.type === 'COR3_AUTOMATION_PROGRESS' && ['jobs', 'valuables'].includes(event.data.feature)) {
+            const progress = event.data.progress;
+            if (progress?.message) saveProgress(event.data.feature, progress.message, { name: progress.jobName, serverName: progress.serverName }, progress.nextAt, progress.at);
+        }
 
         if (event.data && event.data.type === 'COR3_AUTOJOB_ENABLE_DECRYPT_SOLVER') {
             chrome.storage.sync.get('autoDecryptEnabled', (result) => {
@@ -62,6 +68,9 @@ export function setupEngineRelay() {
         if (event.data && event.data.type === 'COR3_WS_NETWORK_MAP') {
             chrome.storage.local.set({ serverMaintenanceMap: event.data.servers });
         }
+        if (event.data?.type === 'COR3_WS_MAP_DATA' && Array.isArray(event.data.servers)) {
+            chrome.storage.local.set({ networkMapData: { servers: event.data.servers, connections: event.data.connections || [] } });
+        }
         if (event.data && event.data.type === 'COR3_DEV_TC_REACH_PROGRESS') {
             chrome.storage.local.set({ _devTcReachProgress: { log: event.data.log || [] } });
         }
@@ -106,7 +115,9 @@ export function setupEngineRelay() {
         }
         if (event.data && event.data.type === 'COR3_ALL_MARKETS_REFRESHED') {
             setMarketRefreshInProgress(false);
-            chrome.storage.local.set({ _allMarketsRefreshed: Date.now() });
+            waitForMarketWrites().then(() => chrome.storage.local.set({ _allMarketsRefreshed: Date.now(),
+                marketRefreshResult: { requestId: event.data.requestId, success: event.data.success !== false, completedAt: Date.now(),
+                    markets: event.data.markets || [] } }));
         }
         if (event.data && ['COR3_TOKEN_EXPIRED', 'COR3_CONNECTION_LOST'].includes(event.data.type)) {
             setMarketRefreshInProgress(false);

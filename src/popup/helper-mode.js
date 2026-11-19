@@ -41,7 +41,7 @@ export async function applyHelperMode(helper, mode) {
                 updates[key] = value;
             } else if (key === 'autoSendMerc') {
                 disabledValue = {"autoChooseMerc":false,"autoChooseUsolFirst":false,"insureHighRisk":false,"ignoreEliteMerc":false,"keepCreditReserve":true,"applyMercCostLimiter":false,"maxMercCost":15000,"disabledReason":null,"enabled":false,"mercenaryId":"","mercenaryName":""};
-                value = state.isHelper ? disabledValue : (oldValues[key] ?? disabledValue);
+                value = state.isHelper ? disabledValue : (oldValues[key] ?? { ...disabledValue, autoChooseMerc: true, insureHighRisk: true, ignoreEliteMerc: true });
                 updates[key] = value;
             } else if (key === 'decisionModifiers') {
                 let loot = oldValues[key] ? (oldValues[key]).loot : 1;
@@ -50,7 +50,7 @@ export async function applyHelperMode(helper, mode) {
                 value = state.isHelper ? disabledValue : (oldValues[key] ?? { ...disabledValue, enabled: true, autoChoose: true, noWaitAutoChoose: true, getRidOfVeterans: true });
                 updates[key] = value;
             } else {
-                value = state.isHelper ? false : (oldValues[key]);
+                value = state.isHelper ? false : (oldValues[key] ?? false);
                 updates[key] = value;
             }
         });
@@ -80,7 +80,7 @@ export async function applyHelperMode(helper, mode) {
         // Auto Jobs and Auto Update Markets
 
         (document.getElementById('autoJobSolverToggle')).checked = !!toggles.autoJobSolverEnabled;
-        (document.getElementById('autoJobSolverStatus')).textContent = !!toggles.autoJobSolverEnabled ? 'Active' : 'Off';
+        (document.getElementById('autoJobSolverStatus')).textContent = !!toggles.autoJobSolverEnabled ? 'Shown' : 'Hidden';
         (document.getElementById('autoJobSolverStatus')).style.color = !!toggles.autoJobSolverEnabled ? 'var(--accent-green)' : 'var(--text-dim)';
         (document.getElementById('autoUpdateMarketsToggle')).checked = !!toggles.autoUpdateMarkets;
         (document.getElementById('autoUpdateMarketsStatus')).textContent = !!toggles.autoUpdateMarkets ? 'Active' : 'Off';
@@ -106,15 +106,15 @@ export async function applyHelperMode(helper, mode) {
         (document.getElementById('getRidOfVeteransToggle')).checked = toggles.decisionModifiers?.getRidOfVeterans !== false;
 
         (document.getElementById('autoSendMercenaryToggle')).checked = !!toggles.autoSendMerc?.enabled;
-        (document.getElementById('autoChooseMercToggle')).checked = !!toggles.autoSendMerc?.autoChooseMerc;
+        (document.getElementById('autoChooseMercToggle')).checked = toggles.autoSendMerc?.autoChooseMerc !== false;
         (document.getElementById('autoChooseUsolFirstToggle')).checked = !!toggles.autoSendMerc?.autoChooseUsolFirst;
-        (document.getElementById('insureHighRiskToggle')).checked = !!toggles.autoSendMerc?.insureHighRisk;
+        (document.getElementById('insureHighRiskToggle')).checked = toggles.autoSendMerc?.insureHighRisk !== false;
         (document.getElementById('keepMercCreditReserveToggle')).checked = toggles.autoSendMerc?.keepCreditReserve !== false;
-        (document.getElementById('ignoreEliteMercToggle')).checked = !!toggles.autoSendMerc?.ignoreEliteMerc;
+        (document.getElementById('ignoreEliteMercToggle')).checked = toggles.autoSendMerc?.ignoreEliteMerc !== false;
         (document.getElementById('applyMercCostLimiterToggle')).checked = !!toggles.autoSendMerc?.applyMercCostLimiter;
         (document.getElementById('maxMercCostInput')).value = toggles.autoSendMerc?.maxMercCost ?? 15000;
         (document.getElementById('mercCostDisplayValue')).textContent = toggles.autoSendMerc?.maxMercCost ?? 15000;
-        (document.getElementById('autoSellCheapestToggle')).checked = !!toggles.autoSellCheapest;
+        (document.getElementById('autoSellCheapestToggle')).checked = toggles.autoSellCheapest === true;
 
     }
 

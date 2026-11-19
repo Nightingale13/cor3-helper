@@ -1,10 +1,11 @@
 // Auto-Send Mercenary logic
 
 import { isContextValid, _automationEnqueue, _automationFinish, _broadcastQueueStatus, getAutomationActive, setAutomationActive, getAutomationQueue } from './helpers.js';
-import { collectExpeditionMail, waitForGameReply } from './expedition-mail.js';
+import { collectPendingRewardMail, noteRewardCompletion, hasRewardMailToCollect, waitForGameReply } from './expedition-mail.js';
 import { freeMailSpace } from './inventory-space.js';
 import { userIdleTimeout as setTimeout, safeClearTimeout as clearTimeout, automationPaused } from '../shared/ws-utils.js';
 import { isTransientAutomationError, automationRetrySeconds, isInsufficientCredits } from '../shared/automation-recovery.js';
+import { saveProgress } from './progress.js';
 
 export let _initialFetchDone = false; // false during initial data fetch after reconnect
 export let autoSendInProgress = false;
@@ -47,9 +48,8 @@ export async function waitForAutoSendFunds(requiredCredits = null) {
     const settings = await chrome.storage.sync.get('autoSendMerc');
     if (!settings.autoSendMerc?.enabled) return;
     clearFundingWait();
-    fundingWait = { requiredCredits: Number.isFinite(requiredCredits) ? requiredCredits : null, since: Date.now() };
-    chrome.storage.local.set({ autoSendFundingWait: fundingWait,
-        mercWarning: FUNDING_WAIT_WARNING });
+    fundingWait = { requiredCredits: Number.isFinite(requiredCredits) ? requiredCredits : null, since: Date.now(), nextRetryAt: Date.now() + 60000 };
+    chrome.storage.local.set({ autoSendFundingWait: fundingWait });
     chrome.storage.local.remove('expeditionLaunchError');
     stopAutoSend(false);
     fundingTimer = setTimeout(() => resumeAutoSendAfterFunding(), 60000);
@@ -63,6 +63,8 @@ export async function resumeAutoSendAfterFunding(balance) {
     if (!settings.autoSendMerc?.enabled) { clearFundingWait(); return; }
     if (!_initialFetchDone) {
         clearTimeout(fundingTimer);
+        waiting.nextRetryAt = Date.now() + 60000;
+        chrome.storage.local.set({ autoSendFundingWait: waiting });
         fundingTimer = setTimeout(() => resumeAutoSendAfterFunding(), 60000);
         return;
     }
@@ -164,11 +166,12 @@ export function setupAutoSendRecovery() {
     recoverAutoSendTimeout().catch(error => console.log('[COR3 Helper] Auto-send recovery deferred:', error.message));
 }
 
-async function collectMailBeforeNextMerc() {
+async function collectMailBeforeNextMerc(finished = []) {
     const controller = new AbortController();
     const generation = autoSendGeneration;
     mailCollection = controller;
     try {
+        for (const expedition of finished) await noteRewardCompletion('EXPEDITION', expedition.id);
         const current = await waitForGameReply('COR3_WS_EXPEDITIONS', { type: 'COR3_REQUEST_EXPEDITIONS' }, controller.signal,
             reply => Array.isArray(reply.expeditions) && reply.expeditions.every(e => e.id && e.status));
         if (current.expeditions.some(e => e.status !== 'COMPLETED' && e.status !== 'FAILED')) {
@@ -176,8 +179,10 @@ async function collectMailBeforeNextMerc() {
             return;
         }
         for (const expedition of current.expeditions) {
+            await noteRewardCompletion('EXPEDITION', expedition.id);
             if (expedition.containerOpenedAt) continue;
             console.log('[COR3 Helper] Paying expedition balance and sending rewards to mail:', expedition.id);
+            saveProgress('mercenaries', 'Paying and collecting expedition rewards');
             const settled = await waitForGameReply('COR3_WS_EXPEDITION_SETTLED', {
                 type: 'COR3_PAY_EXPEDITION_TO_MAIL', expeditionId: expedition.id
             }, controller.signal, reply => reply.error || reply.data?.id === expedition.id);
@@ -192,7 +197,11 @@ async function collectMailBeforeNextMerc() {
                 throw Object.assign(new Error('The expedition payment was not confirmed. Rechecking current state.'), { code: 'game_reply_timeout' });
             }
         }
-        await collectExpeditionMail({ signal: controller.signal, freeSpace: freeMailSpace });
+        if (await hasRewardMailToCollect('EXPEDITION')) {
+            saveProgress('mercenaries', 'Collecting completed expedition rewards');
+            await collectPendingRewardMail({ source: 'EXPEDITION', signal: controller.signal, freeSpace: freeMailSpace });
+        }
+        saveProgress('mercenaries', 'Checking available mercenaries');
         const latest = await waitForGameReply('COR3_WS_EXPEDITIONS', { type: 'COR3_REQUEST_EXPEDITIONS' }, controller.signal,
             reply => Array.isArray(reply.expeditions) && reply.expeditions.every(e => e.id && e.status));
         if (controller.signal.aborted) return;
@@ -283,7 +292,7 @@ export function checkAutoSendOnExpeditionData(expeditions) {
     chrome.storage.sync.get(['autoSendMerc', 'helperMode'], (settings) => {
         if (autoSendInProgress) return;
         if (fundingWait || !_initialFetchDone || settings.helperMode || !settings.autoSendMerc?.enabled ||
-            (!settings.autoSendMerc.mercenaryId && !settings.autoSendMerc.autoChooseMerc)) {
+            (!settings.autoSendMerc.mercenaryId && settings.autoSendMerc.autoChooseMerc === false)) {
             _automationFinish('auto-send');
             return;
         }
@@ -340,7 +349,7 @@ export function checkAutoSendOnExpeditionData(expeditions) {
             chrome.storage.local.remove('expeditionLaunchError');
             if (!getAutomationActive()) setAutomationActive({ type: 'auto-send', startedAt: Date.now() });
             _broadcastQueueStatus();
-            collectMailBeforeNextMerc();
+            collectMailBeforeNextMerc(expeditions);
             return;
         }
         _automationFinish('auto-send');
@@ -385,7 +394,7 @@ export function proceedWithMerc(mercId, allMercs, settings, localData) {
     // Insurance is an optional launch modifier only. It must never affect which
     // mercenary is selected or whether an otherwise-valid launch proceeds.
     const mercConfig = localData.mercConfigData?.[mercId];
-    const insuranceEnabled = settings.autoSendMerc.insureHighRisk === true;
+    const insuranceEnabled = settings.autoSendMerc.insureHighRisk !== false;
     const isHighRisk = String(mercConfig?.riskLevel ?? '').trim().toUpperCase() === 'HIGH';
     const hasInsurance = insuranceEnabled && isHighRisk && !!mercConfig?.isInsuranceAvailable;
     const launchConfig = {
@@ -404,6 +413,7 @@ export function proceedWithMerc(mercId, allMercs, settings, localData) {
         }
     }
     console.log('[COR3 Helper] Auto-send: launching expedition with mercenary:', selectedMerc.callsign, '(' + (isUsol ? 'USOL' : 'CORE') + ')');
+    saveProgress('mercenaries', 'Sending the selected mercenary', { name: selectedMerc.callsign });
     const generation = autoSendGeneration;
     setTimeout(async () => {
         const current = await chrome.storage.sync.get(['autoSendMerc', 'helperMode']);

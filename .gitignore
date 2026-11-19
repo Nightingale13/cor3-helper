@@ -1,5 +1,6 @@
 node_modules/
 dist/
-RELEASE_NOTES.md
-release_notes.md
 tests/
+release_notes.md
+pull_request.md
+AGENTS.md

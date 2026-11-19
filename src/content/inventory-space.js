@@ -1,21 +1,24 @@
 import { waitForGameReply } from './expedition-mail.js';
+import { protectedStashSales } from '../shared/inventory-protection.js';
 
 export async function freeMailSpace(stash, slots, signal) {
-    const settings = await chrome.storage.sync.get('autoSellCheapest');
-    if (!settings.autoSellCheapest) throw Object.assign(new Error('Stash is full. Clear inventory before claiming reward mail.'), { code: 'stash_full' });
-    const items = stash.items.filter(i => i.canSell && i.sellPrice > 0)
-        .sort((a, b) => a.sellPrice * (a.quantity || 1) - b.sellPrice * (b.quantity || 1));
     let freed = 0;
-    for (const item of items) {
+    while (freed < slots) {
         if (signal.aborted) throw new DOMException('Mail collection cancelled', 'AbortError');
+        const [settings, saved] = await Promise.all([chrome.storage.sync.get(['autoSellCheapest', 'helperMode']),
+            chrome.storage.local.get('protectedInventoryRules')]);
+        if (settings.autoSellCheapest !== true || settings.helperMode) throw Object.assign(new Error('Stash is full. Clear inventory before claiming reward mail.'), { code: 'stash_full' });
+        const sale = protectedStashSales(stash.items, saved.protectedInventoryRules || [])[0];
+        if (!sale) throw Object.assign(new Error('Stash is full. The remaining items are protected or cannot be sold. Free some space before claiming reward mail.'), { code: 'stash_full' });
+        const { item, quantity } = sale;
         console.log('[COR3 Helper] Auto-sell for reward mail:', item.name);
         // Wait for confirmed removal before selling another item or retrying the claim.
-        await waitForGameReply('COR3_WS_STASH', {
-            type: 'COR3_SELL_ITEM', itemId: item.id, quantity: item.quantity || 1
+        const reply = await waitForGameReply('COR3_WS_STASH', {
+            type: 'COR3_SELL_ITEM', itemId: item.id, quantity
         }, signal, reply => Array.isArray(reply.stash?.items) && !reply.stash.items.some(i => i.id === item.id));
-        freed += (item.width || 1) * (item.height || 1);
-        if (freed >= slots) return;
+        freed += Number.isFinite(stash.currentUsage) && Number.isFinite(reply.stash.currentUsage)
+            ? Math.max(0, stash.currentUsage - reply.stash.currentUsage) : (item.width || 1) * (item.height || 1);
+        stash = reply.stash;
     }
-    throw Object.assign(new Error('Insufficient sellable items to make room for reward mail.'), { code: 'stash_full' });
 }
 

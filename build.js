@@ -14,6 +14,7 @@ const sharedConfig = {
     minify: false,
     legalComments: 'none',
     logLevel: 'info',
+    define: { __COR3_BUILD_ID__: JSON.stringify(new Date().toISOString()) },
     outdir: DIST,
 };
 

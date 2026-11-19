@@ -13,18 +13,19 @@ const refresh = document.getElementById('refreshDroneBtn');
 let cfg = droneSettings();
 let data = null;
 let automationStatus = null;
+let availability = null;
 let repairWhileCharging;
 let dataUpdatedAt = null;
 let batteryUpdatedAt = null;
 let repairUpdatedAt = null;
-let statusChip = null;
-let chargeChip = null;
 let repairPlan = null;
 let activeMission = null;
 let completedMission = null;
 let automationQueue = null;
 let batteryValue = null;
 let durabilityValue = null;
+let refreshPending = false;
+let refreshTimer = null;
 const pair = (current, max) => Number.isFinite(current) ? current + (Number.isFinite(max) ? ' / ' + max : '') : '—';
 
 function updateDroneStatus() {
@@ -33,19 +34,10 @@ function updateDroneStatus() {
     if (durabilityValue) durabilityValue.textContent = pair(droneDurabilityLevel(data, repairUpdatedAt, repairPlan, now), data?.drone?.maxDurability);
     const view = dronePanelStatus({ options: data, settings: cfg, updatedAt: dataUpdatedAt, batteryUpdatedAt, repairUpdatedAt,
         repairPlan, repairWhileCharging, mission: activeMission, completed: completedMission,
-        automationStatus, queue: automationQueue, helperMode: state.isHelper }, now);
-    if (statusChip) {
-        statusChip.textContent = view.text;
-        statusChip.title = view.detail;
-        statusChip.className = 'merc-status ' + view.className;
-    }
-    if (chargeChip) {
-        chargeChip.textContent = view.secondaryText || '';
-        chargeChip.style.display = view.secondaryText ? '' : 'none';
-        chargeChip.title = view.detail;
-    }
-    status.textContent = view.detail;
-    status.className = cfg.paused ? 'warning-banner' : 'merc-info drone-note';
+        automationStatus, queue: automationQueue, helperMode: state.isHelper, availability }, now);
+    status.replaceChildren(el('strong', null, view.icon ? el('span', { 'aria-hidden': 'true' }, view.icon + ' ') : null,
+        el('span', null, view.text)), el('span', null,
+        [view.secondaryText, view.detail].filter(Boolean).join(' · ')));
 }
 function duration(seconds) {
     if (!Number.isFinite(seconds) || seconds < 0) return '—';
@@ -55,7 +47,16 @@ function duration(seconds) {
 const controls = [];
 const editors = [];
 const stats = el('div');
-const status = el('div', { role: 'status', className: 'merc-info drone-note' });
+const status = el('div', { role: 'status', className: 'automation-state', id: 'droneAutomationStatus' });
+const refreshFeedback = el('div', { role: 'status', className: 'drone-note', id: 'droneRefreshStatus', hidden: true });
+function finishRefresh(message = '') {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+    refreshPending = false;
+    refresh.disabled = false;
+    refreshFeedback.textContent = message;
+    refreshFeedback.hidden = !message;
+}
 const missionDetails = el('div', { className: 'merc-info drone-note' });
 const repairDetails = el('div', { className: 'drone-note' });
 
@@ -139,29 +140,35 @@ mission.addEventListener('change', () => save({ locationConfigId: location.value
 const resume = el('button', { type: 'button', className: 'refresh-btn-small', onclick: () => save({ paused: false }) }, 'Resume automation');
 const resumeRow = el('div', { className: 'drone-note' }, resume);
 refresh.addEventListener('click', async () => {
+    if (refreshPending) return;
+    refreshPending = true;
     refresh.disabled = true;
-    status.textContent = 'Refreshing drone…';
+    refreshFeedback.textContent = 'Refreshing drone…';
+    refreshFeedback.hidden = false;
+    refreshTimer = setTimeout(() => finishRefresh('Drone data has not updated yet. You can try again.'), 30000);
     try {
         const tab = await getCor3Tab();
         if (!tab) throw new Error('Open cor3.gg to refresh drone data.');
-        await chrome.tabs.sendMessage(tab.id, { action: 'requestDroneOptions' });
-    } catch (error) { status.textContent = error.message; }
-    finally { refresh.disabled = false; }
+        const response = await chrome.tabs.sendMessage(tab.id, { action: 'requestDroneOptions' });
+        if (response?.error || response?.success === false) throw new Error(response.error?.message || response.error || 'Could not request drone data. Try again.');
+    } catch (error) { finishRefresh(error.message); }
 });
 
 container.classList.add('drone-panel');
 container.replaceChildren(
+    status, refreshFeedback, stats, resumeRow,
     numberSetting('Minimum durability before repair', 'repairThreshold', 0, 99),
     numberSetting('Repair target', 'repairTarget', 1, 100),
-    switchRow('Auto-send drone after expedition ends', 'enabled'),
+    repairDetails,
+    switchRow('Automatic Drone Expeditions', 'enabled'),
     switchRow('Auto-choose lowest battery cost mission', 'autoChooseMission', 'Choose the lowest battery cost, then lowest base risk, then shortest duration.'),
     switchRow('Wait for full battery before launching', 'fullCharge'),
     switchRow('Auto-repair at the durability limit', 'autoRepair'),
     switchRow('Repair while charging', 'repairWhileCharging', 'Use the remaining charging time to repair towards full durability. Charging repairs can exceed the normal repair target.'),
+    switchRow('Keep at least 2,000 credits for jobs', 'keepCreditReserve', 'Automatic drone repairs must leave at least 2,000 credits. On by default.'),
     el('div', { className: 'drone-config-row' }, el('label', { for: 'drone-location' }, 'Location:'), location),
     el('div', { className: 'drone-config-row' }, el('label', { for: 'drone-mission' }, 'Mission:'), mission),
-    missionDetails, status, resumeRow, stats, repairDetails,
-    el('div', { className: 'drone-note' }, 'Upgrade modules: manage the six slots in game.')
+    missionDetails
 );
 
 function selectOptions(select, entries, selected) {
@@ -185,41 +192,38 @@ function render() {
     resume.disabled = state.isHelper;
     resumeRow.style.display = cfg.enabled && cfg.paused && !state.isHelper ? '' : 'none';
     stats.replaceChildren();
-    statusChip = null;
-    chargeChip = null;
     batteryValue = null;
     durabilityValue = null;
     if (data?.drone) {
         const drone = data.drone;
-        const chip = el('span');
-        statusChip = chip;
-        chargeChip = el('span', { className: 'merc-status resting', style: 'margin-left:4px;' });
         durabilityValue = el('b', { id: 'drone-durability-value' });
         batteryValue = el('b', { id: 'drone-battery-value' });
         stats.append(el('div', { className: 'merc-card drone-card' },
             el('div', { className: 'merc-details' },
                 el('div', { className: 'merc-name' }, drone.name || 'Personal drone'),
-                el('div', { style: 'margin-top:4px;margin-bottom:4px;display:flex;flex-wrap:wrap;gap:4px;' }, chip, chargeChip),
                 el('div', { className: 'merc-info' }, 'Durability: ', durabilityValue,
                     ' · Battery: ', batteryValue, el('br'),
                     'Stealth: ', el('b', null, pair(drone.stealth)), ' · Payload: ',
                     el('b', null, Number.isFinite(drone.payloadGrams) ? (drone.payloadGrams / 1000).toLocaleString() + ' kg' : '—')))));
-    } else stats.append(el('div', { className: 'no-decisions' }, 'No drone data yet. Click 🔄 to refresh.'));
+    } else stats.append(el('div', { className: 'no-decisions' }, availability?.state === 'unavailable' || (data && Object.hasOwn(data, 'drone'))
+        ? 'Waiting for a drone. Unlock your drone in the game.' : 'No drone data yet. Click 🔄 to refresh.'));
     const locations = data?.locations || [];
     selectOptions(location, locations, cfg.locationConfigId);
     selectOptions(mission, locations.find(l => l.id === location.value)?.missions || [], cfg.missionConfigId);
-    location.disabled = mission.disabled = state.isHelper || cfg.autoChooseMission;
+    location.disabled = mission.disabled = state.isHelper || cfg.autoChooseMission || !data?.drone;
     const selected = pickDroneMission(data, cfg);
     missionDetails.textContent = selected ? 'Battery cost: ' + selected.batteryCost + ' · Duration: ' + duration(selected.durationSeconds) +
         (Number.isFinite(selected.baseRisk) ? ' · Base risk: ' + selected.baseRisk : '') : 'No mission with a known battery cost selected.';
     const drone = data?.drone;
-    if (drone && Number.isFinite(drone.maxDurability) && Number.isFinite(drone.durability) && data.repairRate) {
+    repairDetails.textContent = '';
+    if (drone && !drone.isRepairing && !data.activeMissionId && cfg.autoRepair &&
+        Number.isFinite(drone.maxDurability) && Number.isFinite(drone.durability) &&
+        Number.isFinite(data.repairRate?.creditsPerPoint) && Number.isFinite(data.repairRate?.secondsPerPoint)) {
         const points = Math.max(0, Math.ceil(drone.maxDurability * cfg.repairTarget / 100) - drone.durability);
-        repairDetails.textContent = 'Normal repairs: start at ' + cfg.repairThreshold + '% durability and aim for ' + cfg.repairTarget + '%.';
-        if (!drone.isRepairing && points > 0) repairDetails.textContent += ' Estimate to target: ' +
+        if (points > 0) repairDetails.textContent = 'Repair to ' + cfg.repairTarget + '%: ' +
             (points * data.repairRate.creditsPerPoint).toLocaleString() + ' CR · ' + duration(points * data.repairRate.secondsPerPoint) + '.';
-        if (cfg.repairWhileCharging) repairDetails.textContent += ' Charging repairs can go beyond this target.';
-    } else repairDetails.textContent = '';
+    }
+    repairDetails.hidden = !repairDetails.textContent;
     updateDroneStatus();
     showLastUpdated(document.getElementById('personalDroneLastUpdated'), 'droneDataUpdatedAt');
 }
@@ -228,10 +232,11 @@ toggle.addEventListener('click', () => {
     toggle.classList.toggle('open'); body.classList.toggle('open');
 });
 chrome.storage.sync.get(['autoDrone', 'helperMode'], result => { cfg = droneSettings(result.autoDrone); state.isHelper = !!result.helperMode; render(); });
-const droneStatusStorageKeys = ['droneData', 'droneDataUpdatedAt', 'droneBatteryUpdatedAt', 'droneRepairUpdatedAt', 'droneStatus', 'droneRepairWhileCharging',
+const droneStatusStorageKeys = ['droneData', 'droneAvailability', 'droneDataUpdatedAt', 'droneBatteryUpdatedAt', 'droneRepairUpdatedAt', 'droneStatus', 'droneRepairWhileCharging',
     'droneRepairPlan', 'droneMissionData', 'droneCompleted', 'automationQueueStatus'];
 chrome.storage.local.get(droneStatusStorageKeys, result => {
     data = result.droneData; dataUpdatedAt = result.droneDataUpdatedAt ?? Date.now();
+    availability = result.droneAvailability;
     batteryUpdatedAt = result.droneBatteryUpdatedAt ?? dataUpdatedAt;
     repairUpdatedAt = result.droneRepairUpdatedAt ?? dataUpdatedAt;
     automationStatus = result.droneStatus; repairWhileCharging = result.droneRepairWhileCharging;
@@ -239,6 +244,7 @@ chrome.storage.local.get(droneStatusStorageKeys, result => {
     completedMission = result.droneCompleted; automationQueue = result.automationQueueStatus; render();
 });
 chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && (changes.droneData?.newValue || changes.droneDataUpdatedAt?.newValue)) finishRefresh();
     if (area === 'sync' && changes.helperMode) state.isHelper = !!changes.helperMode.newValue;
     if (area === 'sync' && changes.autoDrone) cfg = droneSettings(changes.autoDrone.newValue);
     if (area === 'local' && changes.droneData) {
@@ -259,6 +265,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'local' && changes.droneBatteryUpdatedAt) batteryUpdatedAt = changes.droneBatteryUpdatedAt.newValue;
     if (area === 'local' && changes.droneRepairUpdatedAt) repairUpdatedAt = changes.droneRepairUpdatedAt.newValue;
     if (area === 'local' && changes.droneStatus) automationStatus = changes.droneStatus.newValue;
+    if (area === 'local' && changes.droneAvailability) availability = changes.droneAvailability.newValue;
     if (area === 'local' && changes.droneRepairWhileCharging) repairWhileCharging = changes.droneRepairWhileCharging.newValue;
     if (area === 'local' && changes.droneRepairPlan) repairPlan = changes.droneRepairPlan.newValue;
     if (area === 'local' && changes.droneMissionData) activeMission = changes.droneMissionData.newValue;

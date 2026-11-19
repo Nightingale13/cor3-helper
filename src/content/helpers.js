@@ -8,7 +8,7 @@ window.addEventListener('message', event => {
 });
 
 export function isContextValid() {
-    try { return !!chrome.runtime.id && !!chrome.runtime.getManifest(); } catch (e) { return false; }
+    try { return window.__cor3ContentOwnsAutomation !== false && !!chrome.runtime.id && !!chrome.runtime.getManifest(); } catch (e) { return false; }
 }
 
 // --- Automation Queue: prevents parallel endpoint-changing processes ---
@@ -32,6 +32,8 @@ function startAutomation(next) {
 export function _automationQueueStatus() {
     return {
         active: _automationActive ? _automationActive.type : null,
+        startedAt: _automationActive?.startedAt || null,
+        stopping: !!_automationActive?.stopping,
         queued: _automationQueue.map(q => q.type),
         pausedForUser: automationPaused()
     };

@@ -15,6 +15,72 @@
     // Detect context
     var hasStorage = typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
     var isMainWorld = !hasStorage && typeof window !== 'undefined';
+    var uuidPattern = /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/gi;
+    var displayNames = new Map();
+    function learnNames(value, seen = new WeakSet(), depth = 0) {
+        if (typeof value === 'string' && depth < 16 && /^\d*[\[{]/.test(value)) {
+            try { learnNames(JSON.parse(value.replace(/^\d+(?=[\[{])/, '')), seen, depth + 1); } catch (error) {}
+            return;
+        }
+        if (!value || typeof value !== 'object' || seen.has(value) || depth > 16) return;
+        seen.add(value);
+        var name = value.name || value.callsign || value.serverName || value.marketName || value.fileName;
+        if (typeof name === 'string') {
+            var cleanName = name.replace(uuidPattern, '').trim();
+            for (var key of ['id', 'moduleConfigId', 'serverId', 'marketId', 'itemId', 'fileId']) {
+                if ((key === 'serverId' && !value.serverName) || (key === 'marketId' && !value.marketName)) continue;
+                if (cleanName && typeof value[key] === 'string' && value[key].match(uuidPattern)) {
+                    if (displayNames.size >= 5000) displayNames.delete(displayNames.keys().next().value);
+                    displayNames.set(value[key].toLowerCase(), cleanName);
+                }
+            }
+        }
+        for (var child of Object.values(value)) learnNames(child, seen, depth + 1);
+    }
+    function niceText(text, fallback) {
+        return String(text).replace(/\s+\((?:(?:new\s+)?(?:id|fileId|moduleConfigId):\s*)?[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\)/gi, '')
+            .replace(uuidPattern, id => displayNames.get(id.toLowerCase()) || fallback);
+    }
+    function niceValue(value, fallback, seen = new WeakMap(), depth = 0) {
+        if (typeof value === 'string') return niceText(value, fallback);
+        if (!value || typeof value !== 'object') return value;
+        if (value instanceof Date || value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
+        if (depth > 24) return '[Nested details]';
+        if (seen.has(value)) return seen.get(value);
+        var result = Array.isArray(value) ? [] : {};
+        seen.set(value, result);
+        if (value instanceof Error) {
+            result = new Error(niceText(value.message, fallback));
+            result.name = value.name;
+            result.stack = niceText(value.stack || '', fallback);
+            seen.set(value, result);
+        }
+        for (var key of Object.keys(value)) Object.defineProperty(result, niceText(key, fallback), {
+            value: niceValue(value[key], fallback, seen, depth + 1), enumerable: true, configurable: true, writable: true
+        });
+        return result;
+    }
+    function displayArgs(args) {
+        try {
+            var values = Array.from(args);
+            learnNames(values);
+            var text = values.filter(value => typeof value === 'string').join(' ');
+            var fallback = /software/i.test(text) ? 'Unknown software' : /hardware/i.test(text) ? 'Unknown hardware'
+                : /server/i.test(text) ? 'Unknown server' : /mercenary/i.test(text) ? 'Unknown mercenary' : 'Unnamed item';
+            return values.map(value => niceValue(value, fallback));
+        } catch (error) { return ['[Log details unavailable]']; }
+    }
+    // Learn names without changing the messages used by the game or automation.
+    if (typeof window !== 'undefined') window.addEventListener('message', event => {
+        if (event.source === window && /^COR3_/.test(event.data?.type || '')) learnNames(event.data);
+    });
+    if (hasStorage) {
+        var nameKeys = ['loadoutData', 'stashData', 'marketData', 'darkMarketData', 'soyuzMarketData', 'usolMarketData', 'mercenariesData', 'usolMercenariesData', 'autoJobsTracker'];
+        chrome.storage.local.get(nameKeys, data => learnNames(data));
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (area === 'local') for (var key of nameKeys) if (changes[key]) learnNames(changes[key].newValue);
+        });
+    }
 
     // Auto-detect source context
     var source = 'unknown';
@@ -131,7 +197,7 @@
 
         function intercept(level, origFn) {
             return function () {
-                _safeApply(origFn, console, arguments);
+                _safeApply(origFn, console, displayArgs(arguments));
                 var entry = {
                     timestamp: new Date().toISOString(),
                     level: level,
@@ -156,6 +222,8 @@
         console.log = intercept('log', origLog);
         console.warn = intercept('warn', origWarn);
         console.error = intercept('error', origError);
+        for (var method of ['info', 'debug', 'dir', 'table', 'trace', 'group', 'groupCollapsed'])
+            if (typeof console[method] === 'function') console[method] = intercept(method, console[method]);
         return;
     }
 
@@ -203,7 +271,7 @@
 
     function intercept(level, origFn) {
         return function () {
-            try { origFn.apply(console, arguments); } catch (e) { /* DOMException from invalidated context */ }
+            try { origFn.apply(console, displayArgs(arguments)); } catch (e) { /* DOMException from invalidated context */ }
             var entry = {
                 timestamp: new Date().toISOString(),
                 level: level,
@@ -221,4 +289,6 @@
     console.log = intercept('log', origLog);
     console.warn = intercept('warn', origWarn);
     console.error = intercept('error', origError);
+    for (var method of ['info', 'debug', 'dir', 'table', 'trace', 'group', 'groupCollapsed'])
+        if (typeof console[method] === 'function') console[method] = intercept(method, console[method]);
 })();

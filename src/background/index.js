@@ -6,6 +6,12 @@ import { checkAutoChooseBackground } from './auto-choose.js';
 import { scheduleAutoFinishAllBg, scheduleAutoFinishAllBgDebounced, runAutoFinishAllBg, collectJobsBg } from './auto-finish-jobs.js';
 import { MARKET_RESET_DURATIONS_MS } from '../shared/server-constants.js';
 import { isMinigameLocked } from '../shared/job-retry.js';
+import { setupExtensionUpdateChecks } from '../shared/extension-updates.js';
+import { clearSelectionsForNewJobs } from './job-selections.js';
+import { setupAutomationOwner } from './automation-owner.js';
+
+setupAutomationOwner();
+setupExtensionUpdateChecks();
 
 // --- Keep-alive ---
 async function keepWorkerAlive() {
@@ -56,6 +62,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
         }
     }
     if (area === 'local' && (changes.marketData || changes.darkMarketData || changes.soyuzMarketData || changes.usolMarketData)) {
+        clearSelectionsForNewJobs(changes).catch(() => {});
         const now = Date.now();
         const resetChanged = (change, marketKey) => {
             if (!change) return false;
@@ -97,15 +104,28 @@ chrome.storage.onChanged.addListener((changes, area) => {
                 }
                 chrome.storage.local.set({ autoJobsTracker: tracker, autoJobsCompletedResults: cr });
             });
-            chrome.storage.sync.get('autoFinishAllJobsEnabled', (data) => {
-                if (data.autoFinishAllJobsEnabled) scheduleAutoFinishAllBgDebounced();
-            });
+        }
+        // Lots, credits and reputation also update these caches. Only job or
+        // reset changes affect the alarm; the known reset needs no polling.
+        const jobsChanged = change => change && (!change.oldValue ||
+            change.oldValue.nextJobsResetAt !== change.newValue?.nextJobsResetAt ||
+            JSON.stringify(change.oldValue.jobs) !== JSON.stringify(change.newValue?.jobs) ||
+            JSON.stringify(change.oldValue.recentJobs) !== JSON.stringify(change.newValue?.recentJobs));
+        if ([changes.marketData, changes.darkMarketData, changes.soyuzMarketData, changes.usolMarketData].some(jobsChanged)) {
+            scheduleAutoFinishAllBgDebounced();
         }
     }
     if (area === 'local' && changes.initialFetchDoneAt && changes.initialFetchDoneAt.newValue) {
         chrome.storage.sync.get('autoFinishAllJobsEnabled', (data) => {
             if (data.autoFinishAllJobsEnabled) scheduleAutoFinishAllBgDebounced();
         });
+    }
+    if (area === 'local' && (changes.serverMaintenanceMap || changes.autoJobsCompletedResults ||
+        changes.darkMarketAvailable || changes.soyuzMarketAvailable || changes.usolMarketAvailable || changes.marketJobsRevision)) {
+        scheduleAutoFinishAllBgDebounced();
+    }
+    if (area === 'sync' && (changes.autoFinishAllJobsEnabled || changes.helperMode)) {
+        scheduleAutoFinishAllBgDebounced();
     }
 });
 

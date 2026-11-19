@@ -21,6 +21,45 @@ var WS_QUEUE_MAX = 50;
 let plannedEndpoint = null;
 let plannedEndpointOwner = null;
 let sendOwner = null;
+let rateLimitUntil = 0;
+const RATE_LIMIT_PAUSE_MS = 30000;
+export function hasOpenSocket() {
+    return [getActiveSocket(), ...trackedSockets].some(socket => socket?.readyState === OrigWebSocket.OPEN);
+}
+// Several features request the same drone snapshot. Space those reads apart
+// while leaving live decisions free to pass the passive refresh queue.
+const DRONE_OPTIONS_INTERVAL_MS = 2000;
+let droneOptionsLastTime = -Infinity;
+
+function isDroneOptions(msg) {
+    const command = parseCommand(msg);
+    return command?.event.name === 'drone-missions' && command.event.action === 'get.options';
+}
+
+function passiveDroneOptions(msg, options) {
+    return isDroneOptions(msg) && !options.requestId && !options.onResponse && !options.onReject;
+}
+
+function rateLimitError() {
+    return { code: 'rate_limited', message: 'Too many requests. Automation is waiting before checking current game state again.' };
+}
+
+function deferForRateLimit(msg, options) {
+    if (options.cancelled?.()) return false;
+    if (options.onReject) options.onReject(rateLimitError());
+    // Passive refreshes can wait. Unsent paid actions must be re-planned from
+    // fresh state by their automation, never replayed after the pause.
+    else if (isRead(msg)) enqueue(msg, options);
+    if (wsSendQueue.length) scheduleFlush(rateLimitUntil - Date.now(), true);
+    return false;
+}
+
+export function noteServerRateLimit() {
+    rateLimitUntil = Date.now() + RATE_LIMIT_PAUSE_MS;
+    const pending = wsSendQueue.splice(0);
+    for (const entry of pending) deferForRateLimit(entry.msg, entry.options);
+    if (wsSendQueue.length) scheduleFlush(RATE_LIMIT_PAUSE_MS, true);
+}
 const ownerGenerations = new Map();
 export function withWsOwner(owner, run) {
     const previous = sendOwner;
@@ -49,7 +88,8 @@ export function discardDisconnectedWrites() {
 function enqueue(msg, options, first = false) {
     if (options.cancelled?.()) return false;
     wsSendQueue = wsSendQueue.filter(entry => !entry.options.cancelled?.());
-    const capacity = WS_QUEUE_MAX + (options.interactive ? 10 : 0);
+    if (passiveDroneOptions(msg, options) && wsSendQueue.some(entry => passiveDroneOptions(entry.msg, entry.options))) return true;
+    const capacity = WS_QUEUE_MAX + (options.interactive || options.urgent ? 10 : 0);
     if (wsSendQueue.length >= capacity) {
         options.onReject?.({ code: 'request_queue_full', message: 'Game connection is busy; the request was not sent.' });
         return false;
@@ -88,6 +128,8 @@ function scheduleFlush(delayMs, replace = false) {
 }
 
 function blocked(msg, options = {}) {
+    if (isDroneOptions(msg) && (Date.now() - droneOptionsLastTime < DRONE_OPTIONS_INTERVAL_MS ||
+        hasPendingRequest(getActiveSocket(), 'drone-missions', 'get.options'))) return true;
     if (options.interactive) return false;
     const command = parseCommand(msg);
     if (command) {
@@ -110,6 +152,10 @@ function roomCommand(msg) {
 }
 
 function valid(msg, options) {
+    if (window.__cor3AutomationOwner === false) {
+        options.onReject?.({ code: 'automation_not_owner', message: 'The helper is running in another game tab.' });
+        return false;
+    }
     if (options.contextError) { options.onReject?.(options.contextError); return false; }
     const command = parseCommand(msg);
     // Recheck ownership when flushing too: the user may have opened the app
@@ -126,6 +172,7 @@ function valid(msg, options) {
 
 export function wsSendRaw(msg, options = {}) {
     if (!valid(msg, options)) return false;
+    if (Date.now() < rateLimitUntil) return deferForRateLimit(msg, options);
     if (blocked(msg, options)) {
         enqueue(msg, options);
         scheduleFlush(500);
@@ -207,6 +254,7 @@ export function wsSendRaw(msg, options = {}) {
             return false;
         }
         finally { socket.__cor3HelperSending = false; }
+        if (isDroneOptions(msg)) droneOptionsLastTime = Date.now();
         options.onSent?.();
         return true;
     }
@@ -215,12 +263,16 @@ export function wsSendRaw(msg, options = {}) {
 function wsSendFlush() {
     wsSendFlushTimer = null;
     if (wsSendQueue.length === 0) return;
+    if (Date.now() < rateLimitUntil) { scheduleFlush(rateLimitUntil - Date.now()); return; }
     var now = Date.now();
     var elapsed = now - wsSendLastTime;
     if (elapsed >= WS_THROTTLE_MS) {
         wsSendQueue = wsSendQueue.filter(entry => !entry.options.cancelled?.());
         // Passive updates (including drone data) may pass deferred network work.
-        var index = wsSendQueue.findIndex(entry => entry.options.interactive && !blocked(entry.msg, entry.options));
+        // Decisions have a game deadline. They must also pass a series of
+        // popup loadout actions, while retaining the normal request throttle.
+        var index = wsSendQueue.findIndex(entry => entry.options.urgent && !blocked(entry.msg, entry.options));
+        if (index < 0) index = wsSendQueue.findIndex(entry => entry.options.interactive && !blocked(entry.msg, entry.options));
         if (index < 0) index = wsSendQueue.findIndex(entry => !blocked(entry.msg, entry.options));
         if (index < 0) { if (wsSendQueue.length) scheduleFlush(500); return; }
         var next = wsSendQueue.splice(index, 1)[0];
@@ -235,6 +287,7 @@ function wsSendFlush() {
 
 export function wsSend(msg, options = {}) {
     if (!valid(msg, options)) return false;
+    if (Date.now() < rateLimitUntil) return deferForRateLimit(msg, options);
     if (sendOwner) {
         const owner = sendOwner;
         const generation = ownerGenerations.get(owner) || 0;
@@ -252,15 +305,15 @@ export function wsSend(msg, options = {}) {
     options = { endpoint: plannedEndpoint, ...options };
     var now = Date.now();
     var elapsed = now - wsSendLastTime;
-    const canPrioritize = options.interactive && !wsSendQueue.some(entry => entry.options.interactive);
+    const canPrioritize = options.urgent || (options.interactive && !wsSendQueue.some(entry => entry.options.interactive || entry.options.urgent));
     if (elapsed >= WS_THROTTLE_MS && (wsSendQueue.length === 0 || canPrioritize)) {
         // Can send immediately
         wsSendRaw(msg, options);
     } else {
         // Queue and schedule flush
         if (!enqueue(msg, options)) return false;
-        if (!wsSendFlushTimer || options.interactive) {
-            scheduleFlush(Math.max(0, WS_THROTTLE_MS - elapsed), !!options.interactive);
+        if (!wsSendFlushTimer || options.interactive || options.urgent) {
+            scheduleFlush(Math.max(0, WS_THROTTLE_MS - elapsed), !!(options.interactive || options.urgent));
         }
     }
     return true;
@@ -303,8 +356,9 @@ export function leaveRoom(room) {
 
 // Send a join-room message and mark as joined.
 // New format includes jwtToken and clientVersion.
-function sendJoin(room) {
+export function sendJoin(room, options = {}) {
     if (userOwnsRoom(room) || isRoomJoined(getActiveSocket(), room)) return false;
+    if (wsSendQueue.some(entry => !entry.options.cancelled?.() && entry.msg.startsWith('42["join-room",') && roomCommand(entry.msg)?.room === room)) return false;
     var joinData = { room: room };
     // Include jwtToken (strip "Bearer " prefix from captured token)
     var capturedBearerToken = getCapturedBearerToken();
@@ -317,7 +371,7 @@ function sendJoin(room) {
     if (window.__cor3WebVersion) {
         joinData.clientVersion = window.__cor3WebVersion;
     }
-    return wsSend('42["join-room",' + JSON.stringify(joinData) + ']');
+    return wsSend('42["join-room",' + JSON.stringify(joinData) + ']', options);
 }
 
 // Leave multiple rooms in order (child first), with human delays between.

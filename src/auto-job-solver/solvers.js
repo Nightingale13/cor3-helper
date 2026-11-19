@@ -197,7 +197,7 @@ function createFileUpdateListener() {
         if (evt.data && evt.data.type === 'COR3_AUTOJOB_DESKTOP_FILE' && evt.data.data && evt.data.data.file) {
             latestFileId = evt.data.data.file.id;
             latestFileName = evt.data.data.file.name;
-            log('File updated: ' + evt.data.data.file.name + ' (new id: ' + latestFileId + ')');
+            log('File updated: ' + (evt.data.data.file.name || 'Unknown file'));
         }
     };
     window.addEventListener('message', handler);
@@ -294,7 +294,7 @@ async function solveFileDecryption(job) {
             if (condFile) {
                 fileInfo = condFile;
                 if (fileListener.fileId) fileInfo.id = fileListener.fileId;
-                log('Got file info from conditions: ' + condFile.name + ' (id: ' + condFile.id + ')');
+                log('Got file info from conditions: ' + (condFile.name || 'Unknown file'));
             }
         }
 
@@ -465,7 +465,7 @@ async function solveDataDownload(job) {
 
         var condFile = extractFileInfoFromConditions(job);
         if (condFile) {
-            log('Job conditions file: ' + (condFile.name || 'unknown') + ' (id: ' + (condFile.id || 'unknown') + ')');
+            log('Job conditions file: ' + (condFile.name || 'Unknown file'));
         }
 
         var targetFile = await openFolderAndFindFile(job, fileListener.fileId, fileListener.fileName, serverFileName);
@@ -712,7 +712,7 @@ async function solveFileElimination(job) {
         return await stepCompleteJob(job);
     }
 
-    log('Deleting file: ' + jobFile.name + ' (fileId: ' + jobFile.fileId + ')');
+    log('Deleting file: ' + (jobFile.name || 'Unknown file'));
     sendCmd('file.delete', { serverId: job.serverId, fileId: jobFile.fileId });
 
     try {

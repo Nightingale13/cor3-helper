@@ -1,6 +1,7 @@
 // Serialized batched log writers for auto-jobs and valuable seller
 
 import { isContextValid } from './helpers.js';
+import { formatJobLog, rememberJobLogNames } from '../shared/job-log-format.js';
 
 // --- Auto Job Logs ---
 let _autoJobLogQueue = [];
@@ -12,10 +13,12 @@ function _flushAutoJobLogs() {
     if (_autoJobLogFlushing || _autoJobLogQueue.length === 0 || !isContextValid()) return;
     _autoJobLogFlushing = true;
     const pending = _autoJobLogQueue.splice(0);
-    chrome.storage.local.get('autoJobsDebugLogs', (result) => {
+    chrome.storage.local.get(['autoJobsDebugLogs', 'loadoutData', 'autoJobsTracker'], (result) => {
         if (!isContextValid()) { _autoJobLogFlushing = false; return; }
         const logs = Array.isArray(result.autoJobsDebugLogs) ? result.autoJobsDebugLogs : [];
-        for (const entry of pending) logs.push(entry);
+        rememberJobLogNames(result.loadoutData);
+        rememberJobLogNames(result.autoJobsTracker);
+        for (const entry of pending) logs.push({ ...entry, msg: formatJobLog(entry.msg) });
         if (logs.length > 200) logs.splice(0, logs.length - 200);
         chrome.storage.local.set({ autoJobsDebugLogs: logs }, () => {
             _autoJobLogFlushing = false;
@@ -27,7 +30,7 @@ function _flushAutoJobLogs() {
 }
 
 export function queueAutoJobLog(msg, level) {
-    _autoJobLogQueue.push({ timestamp: new Date().toISOString(), msg: msg, level: level || 'info' });
+    _autoJobLogQueue.push({ timestamp: new Date().toISOString(), msg, level: level || 'info' });
     if (!_autoJobLogFlushTimer && !_autoJobLogFlushing) {
         _autoJobLogFlushTimer = setTimeout(_flushAutoJobLogs, 100);
     }

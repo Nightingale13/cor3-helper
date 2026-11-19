@@ -47,7 +47,10 @@ function renderSolverStatus(el, statusObj) {
 function updateDecryptStatusLabel(enabled) { statusLabel(decryptStatus, enabled); }
 function updateIceWallStatusLabel(enabled) { statusLabel(iceWallStatus, enabled); }
 function updateSimpleDecryptStatusLabel(enabled) { statusLabel(simpleDecryptStatus, enabled); }
-function updateDailyHackStatusLabel(enabled) { statusLabel(dailyHackStatus, enabled); }
+function updateDailyHackStatusLabel(enabled) {
+    statusLabel(dailyHackStatus, enabled);
+    if (!enabled && dailyHackLogEl) dailyHackLogEl.style.display = 'none';
+}
 function updateBackgroundStatus() { if (disableBackgroundToggle) statusLabel(backgroundStatus, disableBackgroundToggle.checked); }
 function updateNetworkFogStatus() { if (disableNetworkFogToggle) statusLabel(networkFogStatus, disableNetworkFogToggle.checked); }
 function updateMoveNotificationsStatus() { if (moveNotificationsToggle) statusLabel(moveNotificationsStatus, moveNotificationsToggle.checked); }
@@ -116,16 +119,21 @@ function initAutoDailyHack() {
     });
     autoDailyHackToggle.addEventListener('change', async () => {
         const enabled = autoDailyHackToggle.checked;
-        await chrome.storage.sync.set({ autoDailyHackEnabled: enabled });
         updateDailyHackStatusLabel(enabled);
-
         if (enabled && dailyHackLogEl) {
-            dailyHackLogEl.textContent = 'Starting daily hack solver...';
+            dailyHackLogEl.textContent = 'Checking today’s daily task…';
             dailyHackLogEl.style.display = '';
         }
+        await chrome.storage.sync.set({ autoDailyHackEnabled: enabled });
 
         const tab = await getCor3Tab();
-        if (tab) chrome.tabs.sendMessage(tab.id, { action: "toggleDailyHackSolver", enabled }).catch(() => {});
+        if (tab) await chrome.tabs.sendMessage(tab.id, { action: "toggleDailyHackSolver", enabled }).catch(() => {});
+        const { dailyHackLog, dailyOpsData } = await chrome.storage.local.get(['dailyHackLog', 'dailyOpsData']);
+        if (enabled && autoDailyHackToggle.checked && dailyHackLogEl) {
+            const next = new Date(dailyOpsData?.nextTaskTime).getTime();
+            dailyHackLogEl.textContent = dailyOpsData?.hasClaimedToday && (!Number.isFinite(next) || next > Date.now())
+                ? 'Daily already completed. Waiting for the next daily task.' : dailyHackLog || 'Checking today’s daily task…';
+        }
     });
 }
 
@@ -247,7 +255,10 @@ function initToggleStorageListeners() {
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area === 'local' && changes.dailyHackLog) {
             const msg = changes.dailyHackLog.newValue;
-            if (msg && dailyHackLogEl) { dailyHackLogEl.textContent = msg; dailyHackLogEl.style.display = ''; }
+            if (msg && dailyHackLogEl && autoDailyHackToggle.checked) {
+                dailyHackLogEl.textContent = msg;
+                dailyHackLogEl.style.display = '';
+            } else if (dailyHackLogEl) dailyHackLogEl.style.display = 'none';
         }
         if (area === 'sync' && changes.autoDailyHackEnabled) {
             autoDailyHackToggle.checked = !!changes.autoDailyHackEnabled.newValue;

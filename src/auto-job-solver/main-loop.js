@@ -5,11 +5,12 @@ import { humanDelay } from '../shared/ws-utils.js';
 import { friendlyError } from '../shared/error-map.js';
 import { getServerTypeName } from '../shared/loadout-resolver.js';
 import { state, serverMap, sendCmd, delay, log, SERVER_PATH_MAP } from './state.js';
-import { getServerPriority, getJobTypePriority, isJobBugged, updateTracker, saveCompletedResultsIncremental, signalDone, fetchMapData, checkPathMaintenance, invalidateLoadoutCache, ensureLoadoutForJob } from './helpers.js';
+import { getServerPriority, getJobTypePriority, isJobBugged, updateTracker, saveCompletedResultsIncremental, signalDone, fetchMapData, checkPathMaintenance, invalidateLoadoutCache, ensureLoadoutForJob, getServerNameById } from './helpers.js';
 import { stepSetEndpoint, stepLogin, stepCompleteJob, stepRefreshMarketJobs } from './steps.js';
 import { solveJob } from './solvers.js';
 import { waitForIceWallStuckClear, waitForMinigameWindow } from '../shared/hack-utils.js';
-import { isMinigameLocked } from '../shared/job-retry.js';
+import { isMinigameLocked, isRetryableJobError } from '../shared/job-retry.js';
+import { reportProgress } from '../shared/automation-progress.js';
 
 export async function processQueue() {
     if (state.running) {
@@ -29,6 +30,7 @@ export async function processQueue() {
 
     // Wait if initial page load fetch is still in progress
     if (window.__cor3InitialFetchInProgress) log('Waiting for initial game data before starting Auto Jobs.');
+    if (window.__cor3InitialFetchInProgress) reportProgress('jobs', 'Waiting for initial game data');
     while (window.__cor3InitialFetchInProgress && !state.abortFlag)
         await new Promise(function (r) { setTimeout(r, 500); });
     if (state.abortFlag) return;
@@ -64,7 +66,7 @@ export async function processQueue() {
             var locked = lockedJobs[lk];
             var matchingJob = state.jobQueue.find(function (j) { return j.jobId === locked.jobId; });
             if (!matchingJob) {
-                log('Locked job ' + locked.jobId + ' no longer in queue — ignoring', 'warn');
+                log('A previously locked job is no longer in the queue — ignoring', 'warn');
                 continue;
             }
             if (matchingJob.canComplete) continue;
@@ -78,7 +80,7 @@ export async function processQueue() {
                 log('⚠️ Marked job as skipped (minigame locked): ' + matchingJob.name + ' — lock expires in ~' + lockMins + 'm', 'warn');
                 appliedCount++;
             } else {
-                log('Lock expired for job: ' + (matchingJob.name || locked.jobId) + ' — keeping as pending');
+                log('Lock expired for job: ' + (matchingJob.name || matchingJob.type || 'Unknown job') + ' — keeping as pending');
             }
         }
         if (appliedCount > 0) {
@@ -145,7 +147,7 @@ export async function processQueue() {
                     log('Job completion returned no reward: ' + cj.name, 'warn');
                 }
             } catch (e) {
-                cj.status = 'failed';
+                cj.status = isRetryableJobError(e) ? 'skipped' : 'failed';
                 cj.error = e.message;
                 log('❌ Failed to claim reward: ' + cj.name + ' — ' + e.message, 'error');
             }
@@ -210,7 +212,7 @@ export async function processQueue() {
         try {
             if (!job.alreadyTaken && job.serverId) {
                 checkingAccessBeforeTake = true;
-                log('Checking target access before taking job: ' + (job.serverName || job.serverId));
+                log('Checking target access before taking job: ' + (job.serverName || getServerNameById(job.serverId) || 'Unknown server'));
                 await stepSetEndpoint(job.serverId);
                 await stepLogin(job.serverId);
                 checkingAccessBeforeTake = false;
@@ -333,6 +335,7 @@ export async function processQueue() {
                 job.status = 'pending';
                 job.error = null;
                 log('⚠️ Internal server error on job: ' + job.name + ' — delaying entire process for 5 minutes before retrying...', 'warn');
+                reportProgress('jobs', 'Waiting for the game server before retrying', job, Date.now() + 5 * 60000);
                 updateTracker();
                 for (var waitMin = 5; waitMin > 0 && !state.abortFlag; waitMin--) {
                     log('⏳ Waiting ' + waitMin + ' minute(s) before resuming...', 'info');
@@ -348,10 +351,10 @@ export async function processQueue() {
                 job.status = 'skipped';
                 job.error = errText + ' (will retry next run)';
                 log('⚠️ Job skipped (timeout): ' + job.name + ' — ' + errText, 'warn');
-            } else if (e.message && e.message.includes('rate-limited')) {
+            } else if (isRetryableJobError(e)) {
                 job.status = 'skipped';
                 job.error = errText + ' (will retry next run)';
-                log('⚠️ Job skipped (rate limited): ' + job.name + ' — ' + errText, 'warn');
+                log('⚠️ Job will be retried: ' + job.name + ' — ' + errText, 'warn');
             } else if (checkingAccessBeforeTake) {
                 job.status = 'skipped';
                 job.error = 'Access pre-check failed: ' + errText;
@@ -377,6 +380,7 @@ export async function processQueue() {
             if (i < state.jobQueue.length - 1 && !state.abortFlag) {
                 var interJobDelay = 2000 + Math.floor(Math.random() * 1500);
                 log('Waiting ' + Math.round(interJobDelay / 1000) + 's before next job...');
+                reportProgress('jobs', 'Preparing the next job');
                 await delay(interJobDelay);
             }
         } catch (delayErr) {
@@ -413,6 +417,7 @@ export async function processQueue() {
     if (!state.abortFlag) {
         await new Promise(function (r) { setTimeout(r, 500); });
         log('Refreshing all markets sequentially...');
+        reportProgress('jobs', 'Refreshing markets after the run');
         window.postMessage({ type: 'COR3_REFRESH_ALL_MARKETS_SEQ', skipLots: true }, '*');
         await new Promise(function (resolve) {
             var timer = setTimeout(resolve, 30000);

@@ -1,7 +1,6 @@
 // HTTP intercept: fetch and XHR overrides for version capture, polling parse, bearer token
 import { setCapturedBearerToken } from './state.js';
-
-var webVersion = null;
+import { recordGameVersion } from './game-versions.js';
 
 // --- Helper: Parse Socket.IO polling response for desktop.get.options ---
 // Socket.IO polling responses can contain multiple messages concatenated.
@@ -81,14 +80,7 @@ export function installHttpIntercept() {
             if (url.includes('translation.json')) { // url = /locales/tr/translation.json?v=v1.17.21
                 try {
                     const parsedUrl = new URL(url, window.location.origin);
-                    if (!webVersion) {
-                        webVersion = parsedUrl.searchParams.get('v');
-                    }
-                    console.log('[COR3 Helper] Captured web version from translation.json:', webVersion);
-                    window.__cor3WebVersion = webVersion;
-                    setTimeout(function () {
-                        window.postMessage({ type: 'COR3_WEB_VERSION', version: webVersion }, '*');
-                    }, 250);
+                    recordGameVersion('web', parsedUrl.searchParams.get('v'));
                 } catch (e) {
                     console.log('[COR3 Helper] Error parsing version:', e);
                 }
@@ -115,8 +107,7 @@ export function installHttpIntercept() {
                         resp.clone().json().then(function (data) {
                             if (data && data.systemVersion !== undefined) {
                                 console.log('[COR3 Helper] Captured system version from api/users/me:', data.systemVersion);
-                                window.__cor3SystemVersion = data.systemVersion;
-                                window.postMessage({ type: 'COR3_SYSTEM_VERSION', version: data.systemVersion }, '*');
+                                recordGameVersion('system', data.systemVersion);
                             }
                         }).catch(function () {});
                     }
@@ -158,6 +149,17 @@ export function installHttpIntercept() {
     // Intercept XHR responses from Socket.IO polling transport
     XMLHttpRequest.prototype.send = function () {
         var xhr = this;
+        if (xhr.__cor3Url?.includes('translation.json')) {
+            try { recordGameVersion('web', new URL(xhr.__cor3Url, window.location.origin).searchParams.get('v')); } catch (error) {}
+        }
+        if (xhr.__cor3Url?.includes('api/users/me')) xhr.addEventListener('load', function () {
+            try {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    const data = xhr.responseType === 'json' ? xhr.response : JSON.parse(xhr.responseText);
+                    recordGameVersion('system', data?.systemVersion);
+                }
+            } catch (error) {}
+        });
         if (xhr.__cor3Url && xhr.__cor3Url.includes('socket.io') && xhr.__cor3Url.includes('transport=polling')) {
             xhr.addEventListener('load', function () {
                 try {

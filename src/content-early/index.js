@@ -6,7 +6,7 @@ if (window.__cor3WsInterceptorActive) throw new Error('COR3 already active');
 window.__cor3WsInterceptorActive = true;
 
 // 1. Shared state (constants, globals, mutable vars)
-import './state.js';
+import { OrigWebSocket, trackedSockets, getCapturedBearerToken } from './state.js';
 import { installInteractionGuard } from './interaction-guard.js';
 
 // 2. WS proxy (intercepts WebSocket constructor, tracks sockets)
@@ -39,6 +39,17 @@ import { installMessageListener, installSocketHealthCheck, scheduleVersionRepost
 
 // --- Boot ---
 (function () {
+    window.__cor3AutomationOwner = false;
+    window.addEventListener('message', event => {
+        if (event.source !== window || event.data?.type !== 'COR3_AUTOMATION_OWNERSHIP') return;
+        window.__cor3AutomationOwner = event.data.active === true;
+        if (window.__cor3AutomationOwner) {
+            const token = getCapturedBearerToken();
+            if (token) window.postMessage({ type: 'COR3_BEARER_TOKEN', token }, '*');
+            scheduleVersionRepost();
+            if (trackedSockets.some(socket => socket.readyState === OrigWebSocket.OPEN)) window.__cor3InitialFetch();
+        }
+    });
     // Wire the postUnreachable callback into ws-message-handler to break circular dep
     setPostUnreachable(__cor3PostUnreachable);
     installInteractionGuard();

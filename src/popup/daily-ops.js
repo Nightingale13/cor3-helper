@@ -41,7 +41,10 @@ function calcStreakBonus(streak, rewardsData) {
 export async function displayDailyOpsData(data) {
     if (!data) return;
     state.dailyNextTaskTime = data.nextTaskTime ? new Date(data.nextTaskTime).getTime() : null;
-    dailyClaimed.textContent = data.hasClaimedToday ? 'Yes' : 'No';
+    const claimed = data.hasClaimedToday;
+    dailyClaimed.textContent = claimed === true ? '✓ Yes' : claimed === false ? '⚠ No' : '--';
+    dailyClaimed.style.color = claimed === true ? 'var(--accent-green)' : claimed === false ? 'var(--accent-yellow)' : '';
+    dailyClaimed.style.fontWeight = '600';
     dailyStreak.textContent = data.currentStreak ?? '--';
     dailyDifficulty.textContent = data.difficulty ? ((data.difficulty).charAt(0).toUpperCase() + (data.difficulty).slice(1)) : '--';
     const { dailyRewardsData } = await chrome.storage.local.get('dailyRewardsData');
@@ -90,6 +93,9 @@ export async function fetchDailyOps() {
         } else {
             const { dailyOpsData } = await chrome.storage.local.get('dailyOpsData');
             if (dailyOpsData) await displayDailyOpsData(dailyOpsData);
+            dailyStatusLine.style.display = '';
+            dailyStatusLine.replaceChildren(_h('span', {style: 'color:var(--accent-orange);'}, dailyOpsData
+                ? '⚠️ Could not refresh daily ops. Showing saved data.' : '⚠️ Could not load daily ops. Try again.'));
         }
     } catch (e) {
         console.log('[COR3 Helper] Daily ops fetch error:', e);

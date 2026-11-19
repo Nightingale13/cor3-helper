@@ -39,7 +39,12 @@ export function trackRequest(socket, raw, source, options = {}) {
                 let rooms = manualRooms.get(socket);
                 if (!rooms) { rooms = new Set(); manualRooms.set(socket, rooms); }
                 if (type === 'join-room') rooms.add(data.room);
-                else rooms.delete(data.room);
+                else {
+                    rooms.delete(data.room);
+                    // Closing a game window also leaves its live-update room.
+                    // Notify content so enabled automation can retain its own subscription.
+                    window.postMessage({ type: 'COR3_WS_ROOM_LEFT', room: data.room }, '*');
+                }
             }
         } catch { /* Ignore unrelated frames. */ }
     }
@@ -53,6 +58,9 @@ export function trackRequest(socket, raw, source, options = {}) {
     const key = name + ':' + action;
     const pending = prune(socket, key);
     const request = { source, marketId: command.data?.marketId, requestId: options.requestId,
+        activityCost: options.activityCost,
+        repairTarget: name === 'drone-missions' && action === 'repair' ? command.data?.targetDurability : undefined,
+        droneRevision: options.droneRevision?.(),
         serverId: command.data?.serverId, action, ambiguous: false, onResponse: options.onResponse,
         sentAt: Date.now(), cancelled: options.cancelled, name };
     // If the user interleaves an indistinguishable read, neither reply can safely

@@ -1,11 +1,12 @@
 // chrome.runtime.onMessage listener — handles messages from popup/background
 
-import { isContextValid, _automationEnqueue, _automationFinish, setAutomationQueue, getAutomationQueue, getAutomationActive } from './helpers.js';
+import { isContextValid, _automationEnqueue, _automationFinish, _broadcastQueueStatus, setAutomationQueue, getAutomationQueue, getAutomationActive } from './helpers.js';
 import { userIdleTimeout as setTimeout } from '../shared/ws-utils.js';
 import { isMinigameLocked } from '../shared/job-retry.js';
 import { setAlarms, resetAlarmTriggered, playAlarm, startContinuousAlarm, stopAlarm } from './alarms.js';
 import { setAutoRefreshSettings } from './auto-refresh.js';
 import { requestDroneDecision } from './drone.js';
+import { checkAutoChooseFromContent, requestMercenaryDecision } from './auto-choose.js';
 import { checkAutoDailyHack } from './daily-hack.js';
 import { setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, setAutoJobsActive, _marketRefreshInProgress, _autoUpdateMarketsLastRefresh, queueMarketRefresh } from './auto-update-markets.js';
 import {
@@ -61,8 +62,11 @@ export function setupMessageListener() {
             window.postMessage({ type: "COR3_DRONE_COMMAND", action: "get.options", data: {} }, "*");
             sendResponse({ success: true });
         } else if (request.action === "requestDroneArchived") {
-            window.postMessage({ type: "COR3_DRONE_COMMAND", action: "get.archived", data: { cursor: null, limit: 20 } }, "*");
-            sendResponse({ success: true });
+            chrome.storage.local.get('droneData', local => {
+                if (local.droneData?.drone) window.postMessage({ type: "COR3_DRONE_COMMAND", action: "get.archived", data: { cursor: null, limit: 20 } }, "*");
+                sendResponse({ success: true });
+            });
+            return true;
         } else if (request.action === "updateAlarms") {
             setAlarms(request.alarms || []);
             resetAlarmTriggered();
@@ -117,9 +121,14 @@ export function setupMessageListener() {
         } else if (request.action === "refreshAllMarketsSeq") {
             setAutoUpdateMarketsLastRefresh(Date.now());
             const message = { type: 'COR3_REFRESH_ALL_MARKETS_SEQ', skipLots: !!request.skipLots };
+            if (request.requestId) message.requestId = request.requestId;
             if (request.order) message.order = request.order;
-            const queueResult = queueMarketRefresh('manual-market-refresh', message);
+            const queueResult = queueMarketRefresh(request.requestId ? 'scheduled-market-refresh' : 'manual-market-refresh', message);
             sendResponse({ success: true, queueResult });
+        } else if (request.action === 'cancelScheduledMarketRefresh') {
+            setAutomationQueue(getAutomationQueue().filter(task => task.type !== 'scheduled-market-refresh'));
+            window.postMessage({ type: 'COR3_STOP_MARKET_REFRESH', requestId: request.requestId }, '*');
+            sendResponse({ success: true });
         } else if (request.action === "leaveStash") {
             window.postMessage({ type: 'COR3_LEAVE_STASH' }, '*');
             sendResponse({ success: true });
@@ -161,14 +170,13 @@ export function setupMessageListener() {
         } else if (request.action === "toggleDailyHackSolver") {
             chrome.storage.sync.set({ autoDailyHackEnabled: !!request.enabled }).then(() => checkAutoDailyHack());
             sendResponse({ success: true });
-        } else if (request.action === "respondDecision") {
-            window.postMessage({
-                type: 'COR3_RESPOND_DECISION',
-                expeditionId: request.expeditionId,
-                messageId: request.messageId,
-                selectedOption: request.selectedOption
-            }, '*');
+        } else if (request.action === "checkMercenaryDecisions") {
+            checkAutoChooseFromContent().catch(() => {});
             sendResponse({ success: true });
+        } else if (request.action === "respondDecision") {
+            requestMercenaryDecision(request).then(() => sendResponse({ success: true }))
+                .catch(error => sendResponse({ success: false, error: error.message }));
+            return true;
         } else if (request.action === "requestArchivedExpeditions") {
             window.postMessage({ type: 'COR3_REQUEST_ARCHIVED_EXPEDITIONS' }, '*');
             sendResponse({ success: true });
@@ -245,7 +253,8 @@ export function setupMessageListener() {
             sendResponse({
                 webVersion: window.__cor3WebVersion,
                 systemVersion: window.__cor3SystemVersion,
-                patchVersion: window.__cor3PatchVersion
+                patchVersion: window.__cor3PatchVersion,
+                gameVersionSession: window.__cor3GameVersionSession
             });
         } else if (request.action === "startAutoJobs") {
             ensureAntiAfkEnabled();
@@ -258,6 +267,7 @@ export function setupMessageListener() {
                 try {
                     await injectAutoJobSolver();
                     if (generation !== autoJobsGeneration || !isContextValid()) return;
+                    if (!request.automatic) await chrome.storage.local.remove('autoJobsStoppedRevision');
                     const lockData = await chrome.storage.local.get(['autoJobsLockedJobs', 'autoJobsCompletedResults']);
                     if (generation !== autoJobsGeneration) return;
                     var lockedJobs = [...(lockData.autoJobsLockedJobs || []), ...(lockData.autoJobsCompletedResults || []), ...(settings.lockedJobs || [])];
@@ -297,7 +307,11 @@ export function setupMessageListener() {
             const active = getAutomationActive();
             if (autoJobsStarted && active?.type === 'auto-jobs') active.stopping = true;
             else { setAutoJobsActive(false); _automationFinish('auto-jobs'); }
-            sendResponse({ success: true });
+            _broadcastQueueStatus();
+            chrome.storage.local.get('marketJobsRevision').then(local => chrome.storage.local.set({
+                autoJobsStoppedRevision: local.marketJobsRevision || 0, autoJobsRunning: false
+            })).then(() => sendResponse({ success: true })).catch(error => sendResponse({ success: false, error: error.message }));
+            return true;
         } else if (request.action === "enableHackSolvers") {
             ensureAntiAfkEnabled();
             injectDecryptSolver();
@@ -394,6 +408,7 @@ export function setupMessageListener() {
             if (valuableStarted && ['auto-valuable', 'force-maintenance'].includes(active?.type)) active.stopping = true;
             else if (active?.type === 'force-maintenance') _automationFinish('force-maintenance');
             else _automationFinish('auto-valuable');
+            _broadcastQueueStatus();
             sendResponse({ success: true });
         } else if (request.action === "forceMaintenanceBatch") {
             const generation = valuableGeneration;

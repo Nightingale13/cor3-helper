@@ -11,13 +11,14 @@ import { marketRouteBlocker } from '../shared/market-reachability.js';
 
 function wsSend(message) {
     const generation = getMarketRefreshAbortId();
-    return sendMarketMessage(message, { cancelled: () => generation !== getMarketRefreshAbortId() });
+    return sendMarketMessage(message, { requestId: currentRefresh?.requestId,
+        cancelled: () => generation !== getMarketRefreshAbortId() });
 }
 let currentRefresh = null;
 window.__cor3StopMarketRefresh = function (requestId) {
     if (!currentRefresh || currentRefresh.requestId !== requestId) return;
     bumpMarketRefreshAbortId();
-    currentRefresh.finish();
+    currentRefresh.finish(false);
 };
 
 // Helper: wait for a specific postMessage event type with timeout (MAIN world)
@@ -734,11 +735,19 @@ window.__cor3RefreshAllMarketsSequential = function (callback, opts) {
     var myAbortId = getMarketRefreshAbortId();
     const refresh = { requestId: opts.requestId, done: false, finish };
     currentRefresh = refresh;
-    function finish() {
+    const fresh = new Set();
+    function onJobs(event) {
+        if (event.source === window && event.data?.type === 'COR3_MARKET_FETCH_COMPLETE' &&
+            event.data.requestId === opts.requestId) fresh.add(event.data.marketType);
+    }
+    window.addEventListener('message', onJobs);
+    function finish(success = true) {
         if (refresh.done) return;
         refresh.done = true;
+        window.removeEventListener('message', onJobs);
         if (currentRefresh === refresh) currentRefresh = null;
-        window.postMessage({ type: 'COR3_ALL_MARKETS_REFRESHED', requestId: opts.requestId }, '*');
+        window.postMessage({ type: 'COR3_ALL_MARKETS_REFRESHED', requestId: opts.requestId,
+            success: success && fresh.size > 0, markets: [...fresh], requestedMarkets: order }, '*');
         if (callback) callback();
     }
 
@@ -746,7 +755,7 @@ window.__cor3RefreshAllMarketsSequential = function (callback, opts) {
         if (refresh.done) return;
         if (myAbortId !== getMarketRefreshAbortId()) {
             console.log('[COR3 Helper] Sequential refresh aborted (token-expired)');
-            finish();
+            finish(false);
             return;
         }
         if (idx >= order.length) {

@@ -12,6 +12,7 @@ window.__cor3ResetInitialFetch = function () {
 };
 
 window.__cor3InitialFetch = async function () {
+    if (window.__cor3AutomationOwner === false) return;
     if (initialFetchStarted) return;
     initialFetchStarted = true;
     const current = ++generation;

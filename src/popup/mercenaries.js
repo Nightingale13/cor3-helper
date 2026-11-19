@@ -5,7 +5,7 @@ import { refreshAllTimestamps } from './timestamps.js';
 import { state } from './state.js';
 import { freshMarketFailure, MARKET_RECHECK_MS } from '../shared/market-reachability.js';
 import { loadExpeditions } from './expeditions.js';
-import { mercenaryWarning } from '../shared/merc-status.js';
+import { mercenaryInlineWarning } from '../shared/merc-status.js';
 
 const mercenariesSectionToggle = document.getElementById('mercenariesSectionToggle');
 const mercenariesSectionBody = document.getElementById('mercenariesSectionBody');
@@ -39,7 +39,7 @@ let cachedRecovery = null;
 export function updateMercWarning(settings) {
     warningSettings = settings;
     if (!mercWarning) return;
-    const warning = mercenaryWarning(settings, cachedWarning, cachedRecovery);
+    const warning = mercenaryInlineWarning(settings, cachedWarning, cachedRecovery);
     mercWarning.style.display = warning ? '' : 'none';
     if (!warning) return;
     mercWarning.textContent = '⚠️ ' + warning.message;
@@ -74,13 +74,14 @@ if (refreshMercenariesBtn) {
 
 // Load/save auto-send settings
 chrome.storage.sync.get('autoSendMerc', (data) => {
+    data.autoSendMerc ||= {};
     if (keepMercCreditReserveToggle) keepMercCreditReserveToggle.checked = data.autoSendMerc?.keepCreditReserve !== false;
     if (data.autoSendMerc) {
         autoSendMercenaryToggle.checked = !!data.autoSendMerc.enabled;
-        if (autoChooseMercToggle) autoChooseMercToggle.checked = !!data.autoSendMerc.autoChooseMerc;
+        if (autoChooseMercToggle) autoChooseMercToggle.checked = data.autoSendMerc.autoChooseMerc !== false;
         if (autoChooseUsolFirstToggle) autoChooseUsolFirstToggle.checked = !!data.autoSendMerc.autoChooseUsolFirst;
-        if (insureHighRiskToggle) insureHighRiskToggle.checked = !!data.autoSendMerc.insureHighRisk;
-        if (ignoreEliteMercToggle) ignoreEliteMercToggle.checked = !!data.autoSendMerc.ignoreEliteMerc;
+        if (insureHighRiskToggle) insureHighRiskToggle.checked = data.autoSendMerc.insureHighRisk !== false;
+        if (ignoreEliteMercToggle) ignoreEliteMercToggle.checked = data.autoSendMerc.ignoreEliteMerc !== false;
         if (applyMercCostLimiterToggle) applyMercCostLimiterToggle.checked = !!data.autoSendMerc.applyMercCostLimiter;
         if (maxMercCostInput) maxMercCostInput.value = data.autoSendMerc.maxMercCost ?? 15000;
         if (mercCostDisplayValue) mercCostDisplayValue.textContent = data.autoSendMerc.maxMercCost ?? 15000;
@@ -213,7 +214,7 @@ if (cancelMercCostBtn) {
 const autoSellCheapestToggle = document.getElementById('autoSellCheapestToggle');
 if (autoSellCheapestToggle) {
     chrome.storage.sync.get('autoSellCheapest', (data) => {
-        autoSellCheapestToggle.checked = !!data.autoSellCheapest;
+        autoSellCheapestToggle.checked = data.autoSellCheapest === true;
     });
     autoSellCheapestToggle.addEventListener('change', () => {
         chrome.storage.sync.set({ autoSellCheapest: autoSellCheapestToggle.checked });

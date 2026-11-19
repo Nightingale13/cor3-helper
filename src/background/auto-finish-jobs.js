@@ -2,7 +2,8 @@ import { getCor3Tab, bgAutoJobLog } from './helpers.js';
 import { MARKET_IDS, LOG_JOB_TYPES } from '../shared/server-constants.js';
 import { FALLBACK_PATH_MAP, FALLBACK_SERVER_PRIORITY } from '../shared/server-map.js';
 import { ensureGameConnection, sendGameMessage } from '../shared/game-connection.js';
-import { isMinigameLocked } from '../shared/job-retry.js';
+import { isMinigameLocked, isRetryableJobResult } from '../shared/job-retry.js';
+import { marketRouteBlocker, maintenanceActive } from '../shared/market-reachability.js';
 
 const SUPPORTED_JOB_TYPES_BG = [
     'File Decryption', 'IP Injection', 'Data Download', 'Log Deletion',
@@ -31,7 +32,7 @@ function resolveRecentJobMarketBg(recentJob, fallbackKey, marketData, darkMarket
     return fallbackKey;
 }
 
-export function collectJobsBg(marketData, darkMarketData, completedResults, serverMaintenanceMap, soyuzMarketData, usolMarketData) {
+export function collectJobsBg(marketData, darkMarketData, completedResults, serverMaintenanceMap, soyuzMarketData, usolMarketData, networkMapData) {
     const SERVER_PRIORITY = FALLBACK_SERVER_PRIORITY;
     const JOB_TYPE_PRIORITY = ['IP Injection', 'IP Cleanup', 'Data Upload', 'Data Download', 'Log Deletion', 'Log Download', 'File Elimination', 'File Decryption', 'Decrypt & Extract'];
     const maint = serverMaintenanceMap || {};
@@ -45,18 +46,21 @@ export function collectJobsBg(marketData, darkMarketData, completedResults, serv
             }
         }
     }
-    function getPathBlocker(serverName) {
-        const path = SERVER_PATH_MAP[serverName];
-        if (!path) return { blocked: false };
-        for (const srv of path) {
-            const info = maint[srv.id];
-            if (info && info.isInMaintenance) {
-                if (!info.maintenanceEndsAt || new Date(info.maintenanceEndsAt).getTime() > now) {
-                    return { blocked: true, blockerName: srv.name, blockerId: srv.id, maintenanceEndsAt: info.maintenanceEndsAt || null };
-                }
-            }
+    function getPathBlocker(serverName, serverId) {
+        const servers = Array.isArray(networkMapData?.servers) ? networkMapData.servers.map(server => ({ ...server, ...maint[server.id] })) : null;
+        const target = servers?.find(server => server.id === serverId || server.serverName === serverName);
+        if (target && Array.isArray(networkMapData.connections)) {
+            const blocker = marketRouteBlocker(servers, networkMapData.connections, target.id);
+            if (blocker && blocker.blockerName !== 'no-path') return { blocked: true, ...blocker,
+                blockerId: servers.find(server => server.serverName === blocker.blockerName)?.id };
+            return { blocked: false };
         }
-        return { blocked: false };
+        // With no live graph, only the target's own maintenance is conclusive.
+        // The solver will fetch routes before accepting a job.
+        const targetId = serverId || SERVER_PATH_MAP[serverName]?.at(-1)?.id;
+        const info = maint[targetId];
+        return maintenanceActive(info, now) ? { blocked: true, blockerName: serverName, blockerId: targetId,
+            maintenanceEndsAt: info.maintenanceEndsAt || null } : { blocked: false };
     }
     function getServerId(job) {
         return (job.relatedServers && job.relatedServers[0]) ? job.relatedServers[0].id
@@ -73,7 +77,7 @@ export function collectJobsBg(marketData, darkMarketData, completedResults, serv
         for (const job of openJobs) {
             const serverName = (job.relatedServers && job.relatedServers[0]) ? job.relatedServers[0].serverName : 'None';
             const serverId = getServerId(job);
-            const blocker = getPathBlocker(serverName);
+            const blocker = getPathBlocker(serverName, serverId);
             if (blocker.blocked) {
                 skippedMaintenance.push({ serverName, serverId, blockerName: blocker.blockerName, blockerId: blocker.blockerId, maintenanceEndsAt: blocker.maintenanceEndsAt });
                 continue;
@@ -93,7 +97,7 @@ export function collectJobsBg(marketData, darkMarketData, completedResults, serv
             const trueMarketKey = resolveRecentJobMarketBg(job, marketKey, marketData, darkMarketData, soyuzMarketData, usolMarketData);
             const serverName = (job.relatedServers && job.relatedServers[0]) ? job.relatedServers[0].serverName : 'None';
             const serverId = getServerId(job);
-            const blocker = getPathBlocker(serverName);
+            const blocker = getPathBlocker(serverName, serverId);
             if (blocker.blocked) {
                 skippedMaintenance.push({ serverName, serverId, blockerName: blocker.blockerName, blockerId: blocker.blockerId, maintenanceEndsAt: blocker.maintenanceEndsAt });
                 continue;
@@ -124,32 +128,94 @@ export function collectJobsBg(marketData, darkMarketData, completedResults, serv
 }
 
 let _scheduleAutoFinishDebounceTimer = null;
+let scheduling = Promise.resolve();
+let activeRun = null;
+let refreshSequence = 0;
+
+async function refreshJobMarkets(tabId, order) {
+    await chrome.storage.local.set({ autoJobsPlanning: { message: 'Refreshing available jobs', at: Date.now() } }).catch(() => {});
+    const requestId = 'jobs-refresh:' + Date.now() + ':' + (++refreshSequence);
+    let finish;
+    const completed = new Promise(resolve => {
+        function listener(changes, area) {
+            const result = changes.marketRefreshResult?.newValue;
+            if (area === 'local' && result?.requestId === requestId) finish(result);
+        }
+        const timer = setTimeout(() => finish({ success: false }), 330000);
+        finish = result => {
+            clearTimeout(timer);
+            chrome.storage.onChanged.removeListener(listener);
+            resolve(result);
+        };
+        chrome.storage.onChanged.addListener(listener);
+    });
+    let queued = false;
+    try {
+        const reply = await chrome.tabs.sendMessage(tabId, { action: 'refreshAllMarketsSeq', skipLots: true, order, requestId });
+        queued = reply?.success && !['already-running', 'already-queued'].includes(reply.queueResult);
+        if (!queued) { finish({ success: false }); return { success: false }; }
+        return await completed;
+    } catch (error) {
+        finish({ success: false });
+        return { success: false };
+    } finally {
+        if (queued) await chrome.tabs.sendMessage(tabId, { action: 'cancelScheduledMarketRefresh', requestId }).catch(() => {});
+    }
+}
+
+// Repeated market updates must not keep pushing an imminent run into the future.
+async function scheduleJobAlarm(delayInMinutes, reason = 'Waiting for the next automatic check') {
+    const existing = await chrome.alarms.get('autoFinishAllJobs');
+    const when = Date.now() + delayInMinutes * 60000;
+    if (existing?.scheduledTime > Date.now() && existing.scheduledTime <= when + 1000) {
+        const { autoJobsSchedule } = await chrome.storage.local.get('autoJobsSchedule');
+        if (autoJobsSchedule?.at !== existing.scheduledTime) await chrome.storage.local.set({
+            autoJobsSchedule: { at: existing.scheduledTime, reason: 'Waiting for the scheduled job check' }
+        }).catch(() => {});
+        return false;
+    }
+    await chrome.alarms.create('autoFinishAllJobs', { when });
+    await chrome.storage.local.set({ autoJobsSchedule: { at: when, reason } }).catch(() => {});
+    return true;
+}
+
 export function scheduleAutoFinishAllBgDebounced() {
-    if (_scheduleAutoFinishDebounceTimer) clearTimeout(_scheduleAutoFinishDebounceTimer);
+    if (_scheduleAutoFinishDebounceTimer) return;
     _scheduleAutoFinishDebounceTimer = setTimeout(() => {
         _scheduleAutoFinishDebounceTimer = null;
         scheduleAutoFinishAllBg();
     }, 2000);
 }
 
-export async function scheduleAutoFinishAllBg() {
-    const settings = await chrome.storage.sync.get('autoFinishAllJobsEnabled');
-    if (!settings.autoFinishAllJobsEnabled) {
+export function scheduleAutoFinishAllBg() {
+    const pending = scheduling.then(scheduleAutoFinish);
+    scheduling = pending.catch(() => {});
+    return pending;
+}
+
+async function scheduleAutoFinish() {
+    const settings = await chrome.storage.sync.get(['autoFinishAllJobsEnabled', 'helperMode']);
+    if (!settings.autoFinishAllJobsEnabled || settings.helperMode) {
         await chrome.alarms.clear('autoFinishAllJobs');
+        await chrome.storage.local.set({ autoJobsSchedule: null }).catch(() => {});
         return;
     }
 
-    const { marketData, darkMarketData, soyuzMarketData, usolMarketData, autoJobsRunning, serverMaintenanceMap } = await chrome.storage.local.get(['marketData', 'darkMarketData', 'soyuzMarketData', 'usolMarketData', 'autoJobsRunning', 'serverMaintenanceMap']);
+    const { marketData, darkMarketData, soyuzMarketData, usolMarketData, autoJobsRunning, serverMaintenanceMap, networkMapData,
+        marketJobsRevision = 0, autoJobsStoppedRevision } = await chrome.storage.local.get(['marketData', 'darkMarketData', 'soyuzMarketData', 'usolMarketData',
+            'autoJobsRunning', 'serverMaintenanceMap', 'networkMapData', 'marketJobsRevision', 'autoJobsStoppedRevision']);
 
-    if (autoJobsRunning) {
+    if (autoJobsRunning || activeRun) {
         return;
     }
 
     const { autoJobsCompletedResults: crSched } = await chrome.storage.local.get('autoJobsCompletedResults');
-    const availableNow = collectJobsBg(marketData, darkMarketData, crSched || [], serverMaintenanceMap, soyuzMarketData, usolMarketData);
-    if (availableNow.length > 0) {
-        bgAutoJobLog('🔄 Auto Finish All: jobs available now — starting in 10s');
-        await chrome.alarms.create('autoFinishAllJobs', { delayInMinutes: 10 / 60 });
+    const availableNow = collectJobsBg(marketData, darkMarketData, crSched || [], serverMaintenanceMap, soyuzMarketData, usolMarketData, networkMapData);
+    const stoppedUntilRefresh = autoJobsStoppedRevision != null && marketJobsRevision <= autoJobsStoppedRevision;
+    if (availableNow.length > 0 && !stoppedUntilRefresh) {
+        if (await scheduleJobAlarm(10 / 60, 'Jobs are available; starting soon')) {
+            bgAutoJobLog('🔄 Auto Finish All: jobs available now — starting in 10s');
+        }
         return;
     }
 
@@ -168,6 +234,7 @@ export async function scheduleAutoFinishAllBg() {
     }
 
     const skipped = availableNow._skippedMaintenance || [];
+    let maintenanceMessage = null;
     if (skipped.length > 0) {
         const seenBlockerIds = new Set();
         for (const s of skipped) {
@@ -179,25 +246,28 @@ export async function scheduleAutoFinishAllBg() {
                     minWaitMs = diff;
                     scheduledReason = `${s.blockerName} maintenance end (+3m buffer)`;
                 }
+            } else if (minWaitMs > 5 * 60 * 1000) {
+                minWaitMs = 5 * 60 * 1000;
+                scheduledReason = 'checking maintenance with no end time';
             }
         }
         const blockedPairs = [...new Set(skipped.map(s =>
             s.blockerName === s.serverName ? s.serverName : `${s.serverName} (blocked by ${s.blockerName})`
         ))].join(', ');
-        bgAutoJobLog(`🔄 Auto Finish All: skipped jobs due to maintenance: ${blockedPairs}`, 'warn');
+        maintenanceMessage = `🔄 Auto Finish All: skipped jobs due to maintenance: ${blockedPairs}`;
     }
 
-    const skippedFromResults = (crSched || []).filter(cr => cr.status === 'skipped');
+    const skippedFromResults = (crSched || []).filter(cr => cr.status === 'skipped' || isRetryableJobResult(cr));
     if (skippedFromResults.length > 0) {
-        let hasEndTimeInfo = false;
         for (const sr of skippedFromResults) {
+            let hasEndTimeInfo = false;
             if (sr.maintenanceEndsAt) {
                 hasEndTimeInfo = true;
                 const diff = new Date(sr.maintenanceEndsAt).getTime() + 3 * 60 * 1000 - now;
                 if (diff > 0 && diff < minWaitMs) {
                     minWaitMs = diff;
                     scheduledReason = `maintenance end (${sr.serverName || 'unknown server'}) (+3m buffer)`;
-                } else if (diff <= 0 && minWaitMs === Infinity) {
+                } else if (diff <= 0 && minWaitMs > 30000) {
                     minWaitMs = 30 * 1000;
                     scheduledReason = `maintenance ended (${sr.serverName || 'unknown server'}) — rechecking`;
                 }
@@ -210,28 +280,51 @@ export async function scheduleAutoFinishAllBg() {
                     scheduledReason = `minigame lock expires (${sr.name || sr.serverName || 'unknown'})`;
                 }
             }
-        }
-        if (!hasEndTimeInfo && minWaitMs === Infinity) {
-            minWaitMs = 10 * 60 * 1000;
-            scheduledReason = 'maintenance fallback (no end time known)';
-            bgAutoJobLog(`🔄 Auto Finish All: ${skippedFromResults.length} job(s) skipped (maintenance) with unknown end time — waiting 10m`, 'warn');
+            if (!hasEndTimeInfo) {
+                const fallback = 5 * 60 * 1000;
+                if (fallback < minWaitMs) {
+                    minWaitMs = fallback;
+                    scheduledReason = 'retrying jobs that could not run earlier';
+                }
+            }
         }
     }
 
     if (minWaitMs < Infinity) {
         const waitMs = minWaitMs + 15000;
         const mins = Math.max(waitMs / 60000, 0.25);
-        bgAutoJobLog(`🔄 Auto Finish All: next run scheduled in ${Math.floor(waitMs / 60000)}m ${Math.floor((waitMs % 60000) / 1000)}s (${scheduledReason})`);
-        await chrome.alarms.create('autoFinishAllJobs', { delayInMinutes: mins });
+        const reason = /maintenance/.test(scheduledReason) ? 'Waiting for server maintenance to finish'
+            : /minigame/.test(scheduledReason) ? 'Waiting for a locked minigame'
+            : /reset/.test(scheduledReason) ? 'Waiting for new market jobs'
+            : 'Waiting before retrying skipped jobs';
+        if (await scheduleJobAlarm(mins, reason)) {
+            if (maintenanceMessage) await bgAutoJobLog(maintenanceMessage, 'warn');
+            await bgAutoJobLog(`🔄 Auto Finish All: next run scheduled in ${Math.floor(waitMs / 60000)}m ${Math.floor((waitMs % 60000) / 1000)}s (${scheduledReason})`);
+        }
     } else {
-        bgAutoJobLog('🔄 Auto Finish All: no reset timer found — checking again in 5m');
-        await chrome.alarms.create('autoFinishAllJobs', { delayInMinutes: 5 });
+        if (await scheduleJobAlarm(5, 'Checking again for available jobs')) {
+            bgAutoJobLog('🔄 Auto Finish All: no reset timer found — checking again in 5m');
+        }
     }
 }
 
-export async function runAutoFinishAllBg() {
-    const settings = await chrome.storage.sync.get('autoFinishAllJobsEnabled');
-    if (!settings.autoFinishAllJobsEnabled) return;
+export function runAutoFinishAllBg() {
+    if (activeRun) return activeRun;
+    activeRun = runAutoFinish().finally(async () => {
+        await chrome.storage.local.set({ autoJobsPlanning: null }).catch(() => {});
+        activeRun = null;
+        await scheduleAutoFinishAllBg();
+    });
+    return activeRun;
+}
+
+async function autoFinishEnabled() {
+    const settings = await chrome.storage.sync.get(['autoFinishAllJobsEnabled', 'helperMode']);
+    return !!settings.autoFinishAllJobsEnabled && !settings.helperMode;
+}
+
+async function runAutoFinish() {
+    if (!await autoFinishEnabled()) return;
 
     const { autoJobsRunning } = await chrome.storage.local.get('autoJobsRunning');
     if (autoJobsRunning) {
@@ -241,30 +334,37 @@ export async function runAutoFinishAllBg() {
     const tab = await getCor3Tab();
     if (!tab) {
         bgAutoJobLog('🔄 Auto Finish All: no cor3.gg tab found — retrying in 1m', 'warn');
-        await chrome.alarms.create('autoFinishAllJobs', { delayInMinutes: 1 });
+        await scheduleJobAlarm(1, 'Waiting for an open game tab');
         return;
     }
 
     // Wait for initial page load fetch to complete before refreshing markets
+    await chrome.storage.local.set({ autoJobsPlanning: { message: 'Checking for available jobs', at: Date.now() } }).catch(() => {});
     let fetchWaitAttempts = 0;
     while (fetchWaitAttempts < 24) {
         const { initialFetchDoneAt } = await chrome.storage.local.get('initialFetchDoneAt');
         if (initialFetchDoneAt) break;
         fetchWaitAttempts++;
-        if (fetchWaitAttempts === 1) bgAutoJobLog('🔄 Auto Finish All: waiting for initial page load to complete...');
+        if (fetchWaitAttempts === 1) {
+            bgAutoJobLog('🔄 Auto Finish All: waiting for initial page load to complete...');
+            await chrome.storage.local.set({ autoJobsPlanning: { message: 'Waiting for initial game data', at: Date.now() } }).catch(() => {});
+        }
         await new Promise(r => setTimeout(r, 5000));
     }
     if (fetchWaitAttempts >= 24) {
-        bgAutoJobLog('🔄 Auto Finish All: initial page load not complete after 120s — proceeding anyway', 'warn');
+        bgAutoJobLog('🔄 Auto Finish All: game data is still loading — checking again in 1m', 'warn');
+        await scheduleJobAlarm(1);
+        return;
     }
 
     const { autoJobsCompletedResults: crPre } = await chrome.storage.local.get('autoJobsCompletedResults');
-    if (Array.isArray(crPre) && crPre.some(cr => cr.status === 'skipped')) {
-        const cleared = crPre.filter(cr => cr.status !== 'skipped' || isMinigameLocked(cr));
+    if (Array.isArray(crPre) && crPre.some(cr => cr.status === 'skipped' || isRetryableJobResult(cr))) {
+        const cleared = crPre.filter(cr => isMinigameLocked(cr) || (cr.status !== 'skipped' && !isRetryableJobResult(cr)));
         await chrome.storage.local.set({ autoJobsCompletedResults: cleared });
     }
 
     for (let attempt = 1; attempt <= 3; attempt++) {
+        if (!await autoFinishEnabled()) return;
         const runCheck = await chrome.storage.local.get('autoJobsRunning');
         if (runCheck.autoJobsRunning) return;
 
@@ -281,40 +381,27 @@ export async function runAutoFinishAllBg() {
         if (expiredMarkets.includes('soyuz')) refreshOrder.push('soyuz');
         if (expiredMarkets.includes('dark')) refreshOrder.push('dark');
         if (expiredMarkets.includes('home')) refreshOrder.push('home');
+        for (const key of ['usol', 'soyuz', 'dark', 'home']) if (!refreshOrder.includes(key)) refreshOrder.push(key);
 
         bgAutoJobLog(`🔄 Auto Finish All: refreshing ${refreshOrder.length > 0 ? refreshOrder.join(', ') : 'all'} market data (attempt ${attempt}/3)...`);
-        try {
-            const refreshMsg = { action: "refreshAllMarketsSeq", skipLots: true };
-            if (refreshOrder.length > 0) refreshMsg.order = refreshOrder;
-            await chrome.tabs.sendMessage(tab.id, refreshMsg);
-        } catch (e) {
-            bgAutoJobLog('🔄 Auto Finish All: failed to refresh markets — ' + (e.message || e), 'error');
-            cor3LogError('background.js', e, { action: 'autoFinishAll-refreshMarkets' });
-            scheduleAutoFinishAllBg();
+        const refreshResult = await refreshJobMarkets(tab.id, refreshOrder);
+        if (!refreshResult.success || !refreshResult.markets?.length) {
+            bgAutoJobLog('🔄 Auto Finish All: fresh job data was not confirmed — checking again in 1m', 'warn');
+            await scheduleJobAlarm(1);
             return;
         }
+        if (!await autoFinishEnabled()) return;
 
-        await new Promise(r => {
-            let done = false;
-            const listener = (changes, area) => {
-                if (area === 'local' && changes._allMarketsRefreshed) {
-                    done = true;
-                    chrome.storage.onChanged.removeListener(listener);
-                    clearTimeout(tmr);
-                    r();
-                }
-            };
-            chrome.storage.onChanged.addListener(listener);
-            const tmr = setTimeout(() => {
-                if (!done) {
-                    chrome.storage.onChanged.removeListener(listener);
-                    r();
-                }
-            }, 30000);
-        });
-
-        const { marketData, darkMarketData, soyuzMarketData, usolMarketData, autoJobsCompletedResults: crRun, serverMaintenanceMap } = await chrome.storage.local.get(['marketData', 'darkMarketData', 'soyuzMarketData', 'usolMarketData', 'autoJobsCompletedResults', 'serverMaintenanceMap']);
-        const jobsToRun = collectJobsBg(marketData, darkMarketData, crRun || [], serverMaintenanceMap, soyuzMarketData, usolMarketData);
+        const local = await chrome.storage.local.get(['marketData', 'darkMarketData', 'soyuzMarketData', 'usolMarketData',
+            'autoJobsCompletedResults', 'serverMaintenanceMap', 'networkMapData', 'marketJobsRevision', 'autoJobsStoppedRevision']);
+        if (local.autoJobsStoppedRevision != null && (local.marketJobsRevision || 0) <= local.autoJobsStoppedRevision) return;
+        const fresh = new Set(refreshResult.markets);
+        const marketData = fresh.has('home') ? local.marketData : null;
+        const darkMarketData = fresh.has('dark') ? local.darkMarketData : null;
+        const soyuzMarketData = fresh.has('soyuz') ? local.soyuzMarketData : null;
+        const usolMarketData = fresh.has('usol') ? local.usolMarketData : null;
+        const jobsToRun = collectJobsBg(marketData, darkMarketData, local.autoJobsCompletedResults || [], local.serverMaintenanceMap,
+            soyuzMarketData, usolMarketData, local.networkMapData);
 
         if (jobsToRun.length > 0) {
             const skippedList = jobsToRun._skippedMaintenance || [];
@@ -333,12 +420,14 @@ export async function runAutoFinishAllBg() {
             const mergedTracker = [...previousJobs, ...jobsToRun];
             try {
                 await ensureGameConnection(tab.id);
+                if (!await autoFinishEnabled()) return;
                 await chrome.storage.local.set({ autoJobsRunning: true, autoJobsQueue: jobsToRun, autoJobsTracker: mergedTracker });
-                await sendGameMessage(tab.id, { action: "startAutoJobs", jobs: jobsToRun });
+                await sendGameMessage(tab.id, { action: "startAutoJobs", jobs: jobsToRun, automatic: true });
             } catch (e) {
                 bgAutoJobLog('🔄 Auto Finish All: failed to start — ' + (e.message || e), 'error');
                 cor3LogError('background.js', e, { action: 'autoFinishAll-startJobs' });
                 await chrome.storage.local.set({ autoJobsRunning: false });
+                await scheduleJobAlarm(1);
             }
             return;
         }
@@ -381,7 +470,7 @@ export async function runAutoFinishAllBg() {
                 const waitMs = earliestResetMs - nowTimerCheck + 15000;
                 const mins = Math.max(waitMs / 60000, 0.25);
                 bgAutoJobLog(`🔄 Auto Finish All: all markets have future reset timers — scheduling next run in ${Math.floor(waitMs / 60000)}m ${Math.floor((waitMs % 60000) / 1000)}s`);
-                await chrome.alarms.create('autoFinishAllJobs', { delayInMinutes: mins });
+                await scheduleJobAlarm(mins, 'Waiting for new market jobs');
                 return;
             }
 

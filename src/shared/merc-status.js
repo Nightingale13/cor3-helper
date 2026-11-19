@@ -12,3 +12,10 @@ export function mercenaryWarning(settings, warning, recovery) {
     if (recovery) return { message: recovery.message || 'Waiting for a game response. Retrying automatically.' };
     return warning ? { message: warning } : null;
 }
+
+// The status at the top already explains credit waits. Keep the lower warning
+// area for selection problems and errors that need attention.
+export function mercenaryInlineWarning(settings, warning, recovery) {
+    const current = mercenaryWarning(settings, warning, recovery);
+    return /^Waiting for credits\b/.test(current?.message || '') ? null : current;
+}

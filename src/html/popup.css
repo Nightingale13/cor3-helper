@@ -459,14 +459,110 @@
             width: 120px;
             padding: 0;
         }
-        #status {
-            margin-top: 10px;
+        #updateCheckInfo,
+        #updateResult {
+            margin-top: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-secondary);
+            overflow-wrap: anywhere;
+        }
+        .update-instructions {
+            display: block;
+            margin-top: 4px;
             font-size: 12px;
-            text-align: center;
-            opacity: 0.8;
+            color: var(--text-secondary);
         }
 
         /* Decisions & Inventory inline sections */
+        .helper-panel > summary {
+            cursor: pointer;
+            list-style: none;
+        }
+        .helper-panel > summary::-webkit-details-marker { display: none; }
+        .helper-panel > summary::after { content: '▸'; margin-left: auto; }
+        .helper-panel[open] > summary::after { content: '▾'; }
+        .helper-panel-note {
+            color: var(--text-secondary);
+            font-size: 12px;
+            line-height: 1.5;
+            margin: 8px 0 0;
+        }
+        .automation-state {
+            color: var(--text-secondary);
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px;
+            margin: 6px 0 10px;
+            font-size: 13px;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+        .automation-state strong { display: block; color: var(--accent-cyan); font-weight: 600; }
+        #dailyHackLog[data-next-check]::after { content: attr(data-next-check); display: block; margin-top: 4px; font-size: 12px; color: var(--text-secondary); }
+        .activity-metrics { width: 100%; border-collapse: collapse; font-size: 13px; line-height: 1.5; }
+        .activity-quick { margin-left: auto; font-size: 12px; font-weight: normal; color: var(--text-secondary); }
+        .activity-panel > summary, .inventory-subsection > summary { list-style: none; flex-wrap: wrap; }
+        .activity-panel > summary::-webkit-details-marker, .inventory-subsection > summary::-webkit-details-marker { display: none; }
+        details[open] > summary .expand-arrow-sub { transform: rotate(90deg); }
+        .activity-panel .activity-quick { padding: 3px 8px; margin-left: 8px; border: 1px solid var(--border); border-radius: 6px; font-variant-numeric: tabular-nums; }
+        .activity-period-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 8px 0; font-size: 13px; }
+        .activity-period-row select { width: auto; flex: 1; min-width: 130px; font-size: 13px; }
+        .inventory-subsection + .inventory-subsection { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 6px; }
+        .inventory-rule-form { margin-top: 10px; font-size: 13px; }
+        .inventory-rule-form > label { display: block; margin-bottom: 4px; }
+        .inventory-rule-form input, .inventory-rule-form select { font-size: 13px; box-sizing: border-box; }
+        .inventory-item-picker { position: relative; }
+        .inventory-picker-input { display: flex; align-items: center; gap: 5px; }
+        .inventory-picker-input input { flex: 1; min-width: 0; }
+        #protectedItemBrowse { width: 32px; min-width: 32px; min-height: 32px; font-size: 18px; }
+        .inventory-item-choices { max-height: 190px; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--accent-cyan); border-radius: 5px; padding: 4px; margin-bottom: 6px; }
+        .inventory-item-choices[hidden] { display: none; }
+        .inventory-item-choices button { display: flex; align-items: center; gap: 8px; width: 100%; margin: 0; padding: 8px; text-align: left; font-size: 13px; font-weight: normal; background: transparent; overflow-wrap: anywhere; }
+        .inventory-choice-icon { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; flex-shrink: 0; }
+        .inventory-choice-icon img { width: 22px; height: 22px; object-fit: contain; }
+        .inventory-choice-name { min-width: 0; }
+        .inventory-item-choices button:hover, .inventory-item-choices button:focus { background: var(--bg-option); outline: 1px solid var(--accent-cyan); }
+        .inventory-rule-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+        .inventory-rule-options select { flex: 1; min-width: 115px; width: auto; }
+        #protectedItemMinimum { width: 72px; }
+        .inventory-protection-rule { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 13px; overflow-wrap: anywhere; }
+        .inventory-protection-rule strong, .inventory-protection-rule span { display: block; }
+        .inventory-protection-rule span { color: var(--text-secondary); font-size: 12px; margin-top: 3px; }
+        .inventory-protection-rule .inventory-rule-name { display: flex; align-items: center; gap: 8px; }
+        .inventory-protection-rule .inventory-rule-name > span { margin-top: 0; color: inherit; font-size: inherit; }
+        .inventory-protection-rule .inventory-rule-name .inventory-choice-icon { display: inline-flex; }
+        .inventory-protection-rule button { flex-shrink: 0; }
+        .inventory-rule-actions { display: flex; gap: 5px; flex-shrink: 0; }
+        .inventory-rule-actions button { width: 32px; min-width: 32px; min-height: 32px; margin: 0; font-size: 14px; }
+        .inventory-rule-delete { color: var(--accent-red); }
+        .inventory-keep-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 6px; }
+        .inventory-keep-controls .inventory-keep-btn { margin: 0; min-height: 30px; }
+        .inventory-keep-controls input.inventory-keep-quantity { width: 62px; min-height: 30px; font-size: 13px; }
+        .inventory-keep-btn { width: auto; margin-top: 6px; padding: 5px 8px; background: var(--bg-card); color: var(--text-secondary); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: 12px; }
+        .inventory-keep-btn[aria-pressed="true"] { color: var(--accent-cyan); border-color: var(--accent-cyan); }
+        .inventory-protection-label { font-size: 12px; color: var(--accent-cyan); margin-top: 5px; line-height: 1.5; }
+        .inventory-quantity { font-size: 12px; color: var(--text-secondary); }
+        .drone-panel .merc-info, .drone-panel .drone-note, #dailyOpsSection > div:not(.daily-section-title), #mercCostDisplay, #mercenaryConfigRow, #mercWarning { font-size: 12px !important; line-height: 1.5; }
+        .inventory-rule-options button, .inventory-protection-rule button { font-size: 12px; min-height: 30px; }
+        .auto-choose-row, .auto-choose-row > span, .auto-choose-row > label:not(.alarm-toggle-switch) { font-size: 12px !important; color: var(--text-secondary); line-height: 1.5; }
+        .auto-choose-row .alarm-toggle-switch { flex-shrink: 0; }
+        .inv-info-btn { width: 30px; min-width: 30px; min-height: 30px; padding: 4px; flex-shrink: 0; }
+        .activity-metrics th { text-align: left; font-weight: normal; color: var(--text-secondary); }
+        .activity-metrics td { text-align: right; font-variant-numeric: tabular-nums; }
+        .activity-positive { color: var(--accent-green); }
+        .activity-negative { color: var(--accent-red); }
+        .activity-neutral { color: var(--text-secondary); }
+        .activity-count { color: var(--accent-cyan); }
+        .activity-reputation, .activity-warning { color: var(--accent-yellow); }
+        .activity-xp { color: var(--accent-purple); }
+        .activity-metrics td:not(.activity-neutral) { font-weight: 600; }
+        .activity-metrics th, .activity-metrics td { padding: 4px 0; }
+        .activity-recent { padding: 0; margin: 8px 0 0; list-style: none; font-size: 12px; line-height: 1.5; }
+        .activity-recent li { padding: 4px 0; border-top: 1px solid var(--border); }
+        .activity-recent time { color: var(--text-muted); margin-right: 6px; }
+
         .decision-card {
             background: var(--bg-card);
             border-radius: 8px;
@@ -1676,8 +1772,10 @@
             background: rgba(21, 28, 34, 1);
             border: 1px solid rgba(96, 108, 124, 1);
             border-radius: 6px;
-            padding: 12px;
-            width: 300px;
+            padding: 16px;
+            width: 400px;
+            max-width: calc(100vw - 32px);
+            box-sizing: border-box;
             max-height: 80vh;
             overflow-y: auto;
             box-shadow: 0 8px 32px rgba(0,0,0,0.6);
@@ -1692,7 +1790,7 @@
         }
         .loadout-hw-info-overlay.open { display: block; }
         .loadout-hw-info-popup .info-title {
-            font-size: 12px;
+            font-size: 16px;
             font-weight: bold;
             color: #fff;
             margin-bottom: 8px;
@@ -1702,9 +1800,10 @@
         }
         .loadout-hw-info-popup .info-title svg { width: 18px; height: 18px; color: rgba(181, 184, 187, 1); }
         .loadout-hw-info-popup .info-desc {
-            font-size: 9px;
-            color: rgba(181, 184, 187, 1);
-            line-height: 1.5;
+            font-size: 14px;
+            color: var(--text-secondary);
+            line-height: 1.6;
+            overflow-wrap: anywhere;
             margin-bottom: 10px;
             display: flex;
             gap: 8px;
@@ -1728,16 +1827,21 @@
             flex-direction: column;
         }
         .loadout-hw-info-popup .info-spec-label {
-            font-size: 8px;
-            color: rgba(107, 120, 136, 1);
+            font-size: 12px;
+            color: var(--text-secondary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
         .loadout-hw-info-popup .info-spec-val {
-            font-size: 11px;
+            font-size: 14px;
             color: rgba(118, 193, 209, 1);
             font-weight: bold;
         }
+        .loadout-hw-info-popup .info-title > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+        .loadout-hw-info-popup .info-desc > span { min-width: 0; }
+        .info-close-btn { width: 32px; margin-left: auto; align-self: flex-start; padding: 6px 8px; min-width: 32px; min-height: 32px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-card); color: var(--text); cursor: pointer; font-size: 15px; flex-shrink: 0; }
+        .info-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+        .info-tags span { font-size: 12px; padding: 3px 8px; border-radius: 10px; background: rgba(118,193,209,0.15); color: var(--accent-cyan); }
         .loadout-hw-replace-list {
             display: none;
             margin-top: 4px;

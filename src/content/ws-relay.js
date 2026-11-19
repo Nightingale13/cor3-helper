@@ -2,7 +2,7 @@
 // This is the first window message listener in content.js
 
 import { isContextValid, _automationFinish, _broadcastQueueStatus, getAutomationActive, setAutomationActive } from './helpers.js';
-import { checkAutoChooseFromContent } from './auto-choose.js';
+import { receiveMercenaryDecisions, receiveMercenaryUpdate, setupMercenaryDecisions } from './auto-choose.js';
 import {
     checkAutoSendOnExpeditionData, proceedWithMerc, waitForAutoSendFunds, resumeAutoSendAfterFunding,
     autoSendInProgress, autoSendAwaitingMercenaries,
@@ -13,6 +13,13 @@ import {
     setAutoSendUsolSkipped, setAutoSendMercRetryCount, setInitialMercsReady
 } from './auto-send.js';
 import { setMarketRefreshInProgress, setAutoUpdateMarketsLastRefresh, setSeqRefreshRunning } from './auto-update-markets.js';
+
+let marketWrites = Promise.resolve();
+export function waitForMarketWrites() { return marketWrites; }
+function storeMarket(values) {
+    marketWrites = marketWrites.catch(() => {}).then(() => chrome.storage.local.set(values));
+    return marketWrites;
+}
 
 function fetchDailyRewards(token) {
     fetch('https://svc-corie.cor3.gg/api/user-daily-claim/rewards', {
@@ -28,6 +35,7 @@ function fetchDailyRewards(token) {
 }
 
 export function setupWsRelay() {
+    setupMercenaryDecisions();
     window.addEventListener('message', (event) => {
         if (event.source !== window) return;
         if (!isContextValid()) return;
@@ -49,7 +57,7 @@ export function setupWsRelay() {
         if (event.data && event.data.type === 'COR3_WS_EXPEDITIONS') {
             chrome.storage.local.set({ expeditionsData: event.data.expeditions, expeditionsDataUpdatedAt: now });
             var exps = event.data.expeditions || [];
-            var hasActive = exps.some(function (e) { return e.status === 'IN_PROGRESS'; });
+            var hasActive = exps.some(function (e) { return ['IN_PROGRESS', 'RUNNING'].includes(e.status); });
             if (!hasActive) {
                 chrome.storage.local.get('expeditionLaunchError', function (result) {
                     if (result.expeditionLaunchError && !result.expeditionLaunchError.noRetry) {
@@ -61,9 +69,9 @@ export function setupWsRelay() {
             checkAutoSendOnExpeditionData(event.data.expeditions);
         }
         if (event.data && event.data.type === 'COR3_WS_DECISIONS') {
-            chrome.storage.local.set({ expeditionDecisions: event.data.decisions });
-            checkAutoChooseFromContent(event.data.decisions);
+            receiveMercenaryDecisions(event.data.decisions, !!event.data.partial).catch(() => {});
         }
+        if (event.data?.type === 'COR3_WS_EXPEDITION_UPDATE') receiveMercenaryUpdate(event.data.data).catch(() => {});
         if (event.data && event.data.type === 'COR3_WS_MAIL') {
             chrome.storage.local.set({ mailData: event.data.data, mailDataUpdatedAt: now }, () => {
                 chrome.storage.local.get('expeditionsData', result => {
@@ -109,16 +117,22 @@ export function setupWsRelay() {
             });
         }
         if (event.data && event.data.type === 'COR3_WS_MARKET') {
-            chrome.storage.local.set({ marketData: event.data.market, marketDataUpdatedAt: now });
+            storeMarket({ marketData: event.data.market, marketDataUpdatedAt: now });
         }
         if (event.data && event.data.type === 'COR3_WS_DARK_MARKET') {
-            chrome.storage.local.set({ darkMarketData: event.data.market, darkMarketAvailable: true, darkMarketDataUpdatedAt: now });
+            storeMarket({ darkMarketData: event.data.market, darkMarketAvailable: true, darkMarketDataUpdatedAt: now });
         }
         if (event.data && event.data.type === 'COR3_WS_SOYUZ_MARKET') {
-            chrome.storage.local.set({ soyuzMarketData: event.data.market, soyuzMarketAvailable: true, soyuzMarketDataUpdatedAt: now });
+            storeMarket({ soyuzMarketData: event.data.market, soyuzMarketAvailable: true, soyuzMarketDataUpdatedAt: now });
         }
         if (event.data && event.data.type === 'COR3_WS_USOL_MARKET') {
-            chrome.storage.local.set({ usolMarketData: event.data.market, usolMarketAvailable: true, usolMarketDataUpdatedAt: now });
+            storeMarket({ usolMarketData: event.data.market, usolMarketAvailable: true, usolMarketDataUpdatedAt: now });
+        }
+        if (event.data?.type === 'COR3_MARKET_JOBS_UPDATED') {
+            marketWrites = marketWrites.catch(() => {}).then(async () => {
+                const { marketJobsRevision = 0 } = await chrome.storage.local.get('marketJobsRevision');
+                await chrome.storage.local.set({ marketJobsRevision: marketJobsRevision + 1 });
+            });
         }
         if (event.data && event.data.type === 'COR3_WS_LOADOUT') {
             chrome.storage.local.set({ loadoutData: event.data.loadout, loadoutAction: event.data.action, loadoutUpdatedAt: now, loadoutError: null });
@@ -150,12 +164,19 @@ export function setupWsRelay() {
             });
         }
         if (event.data && event.data.type === 'COR3_WEB_VERSION') {
+            window.__cor3WebVersion = event.data.version;
             chrome.storage.local.set({ webVersion: event.data.version });
         }
+        if (event.data?.type === 'COR3_GAME_VERSION_SNAPSHOT' && event.data.session) {
+            window.__cor3GameVersionSession = event.data.session;
+            chrome.storage.local.set({ gameVersionSession: event.data.session });
+        }
         if (event.data && event.data.type === 'COR3_SYSTEM_VERSION') {
+            window.__cor3SystemVersion = event.data.version;
             chrome.storage.local.set({ systemVersion: event.data.version });
         }
         if (event.data && event.data.type === 'COR3_PATCH_VERSION') {
+            window.__cor3PatchVersion = event.data.version;
             chrome.storage.local.set({ patchVersion: event.data.version });
         }
         if (event.data && event.data.type === 'COR3_DAILY_REWARDS') {
@@ -275,9 +296,9 @@ export function setupWsRelay() {
                     const allMercs = [...coreMercs, ...usolMercs];
                     let mercId = settings.autoSendMerc.mercenaryId;
 
-                    if (settings.autoSendMerc.autoChooseMerc) {
+                    if (settings.autoSendMerc.autoChooseMerc !== false) {
                         const configs = localData.mercConfigData || {};
-                        const ignoreElite = !!settings.autoSendMerc.ignoreEliteMerc;
+                        const ignoreElite = settings.autoSendMerc.ignoreEliteMerc !== false;
                         const usolFirst = !!settings.autoSendMerc.autoChooseUsolFirst;
                         const eliteIds = new Set();
                         coreElite.forEach(es => { if (es.mercenary) eliteIds.add(es.mercenary.id); });

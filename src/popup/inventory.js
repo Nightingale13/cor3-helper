@@ -3,6 +3,7 @@ import { getCor3Tab } from './utils.js';
 import { refreshAllTimestamps } from './timestamps.js';
 import { state } from './state.js';
 import { itemTierClass, itemTierLabel } from '../shared/item-tier.js';
+import { saveInventoryProtection, inventoryKeepMinimum, updateProtectedStash, inventoryProtectionLabel } from './inventory-protection.js';
 
 const inventoryContainer = document.getElementById('inventoryContainer');
 const inventorySectionToggle = document.getElementById('inventorySectionToggle');
@@ -189,6 +190,7 @@ async function renderSpecialistTimers(data) {
 
 function renderInventory(data) {
     _clearEl(inventoryContainer);
+    updateProtectedStash(data?.items || []);
 
     if (!data || !data.items || data.items.length === 0) {
         inventoryContainer.replaceChildren(_noData('No items found.', 'Make sure you have the cor3.gg tab open.'));
@@ -226,13 +228,14 @@ function renderInventory(data) {
         const tierTagClass = 'tier-tag tier-tag-' + itemTierClass(item.tier);
 
         const badgesEl = _h('div', {className: 'item-badges'}, _h('span', {className: tierTagClass}, itemTierLabel(item.tier)));
+        if (item.quantity > 1) badgesEl.appendChild(_h('span', { className: 'inventory-quantity' }, '×' + item.quantity));
         if (item.canCraft) badgesEl.appendChild(_h('span', {className: 'badge badge-craft'}, 'CRAFT'));
         if (item.canUse) badgesEl.appendChild(_h('span', {className: 'badge badge-use'}, 'USE'));
 
         const invIdx = invItemMap.length;
         invItemMap.push(item);
 
-        const infoBtn = _h('button', {className: 'market-item-info-btn inv-info-btn', dataset: {invIdx: String(invIdx)}, style: 'width: 10%;padding-left: 4px;'});
+        const infoBtn = _h('button', {className: 'market-item-info-btn inv-info-btn', dataset: {invIdx: String(invIdx)}, title: 'Item information', 'aria-label': 'Information about ' + item.name});
         _safeSetHtml(infoBtn, '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><g clip-path="url(#mi2)"><path d="M3.759 1.2H12.243c.703 0 1.3.246 1.81.75.502.503.748 1.095.748 1.797v8.495c0 .71-.246 1.305-.748 1.807-.51.505-1.107.751-1.81.751H3.76c-.71 0-1.306-.246-1.809-.749-.502-.502-.749-1.097-.749-1.808V3.747c0-.703.246-1.295.75-1.798.502-.503 1.098-.75 1.808-.75z" stroke="currentColor" stroke-width="0.8"></path><path d="M6.994 3.837h2.002v1.992H6.994V3.837zM6.994 7.124h2.002v5.049H6.994V7.124z" fill="currentColor"></path></g><defs><clipPath id="mi2"><rect width="16" height="16" fill="currentColor"></rect></clipPath></defs></svg>');
 
         const detailsEl = _h('div', {className: 'item-details'},
@@ -242,6 +245,22 @@ function renderInventory(data) {
             ),
             badgesEl
         );
+        const keepAll = _h('button', { type: 'button', className: 'inventory-keep-btn', title: 'Keep all current and future copies of ' + item.name,
+            onclick: async () => { keepAll.disabled = true; await saveInventoryProtection(item); loadInventory(); } }, '🔒 Keep all');
+        const keepQuantity = _h('input', { type: 'number', min: '1', max: '999999', required: true, value: String(inventoryKeepMinimum(item)),
+            'aria-label': 'Quantity of ' + item.name + ' to keep', className: 'inventory-keep-quantity' });
+        const keepNumber = _h('button', { type: 'button', className: 'inventory-keep-btn', title: 'Keep at least this many copies of ' + item.name }, 'Keep qty');
+        async function keepCount() {
+            if (!keepQuantity.reportValidity()) return;
+            keepNumber.disabled = true;
+            await saveInventoryProtection(item, Number(keepQuantity.value));
+            loadInventory();
+        }
+        keepNumber.addEventListener('click', keepCount);
+        keepQuantity.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); keepCount(); } });
+        detailsEl.appendChild(_h('div', { className: 'inventory-keep-controls' }, keepAll, keepQuantity, keepNumber));
+        const protection = inventoryProtectionLabel(item);
+        if (protection) detailsEl.appendChild(_h('div', { className: 'inventory-protection-label' }, protection));
         if (item.canSell && item.sellPrice) {
             detailsEl.appendChild(_h('div', {className: 'item-action-row'},
                 _h('div', {className: 'item-price'}, '\ud83d\udcb0 ' + item.sellPrice.toLocaleString()),
@@ -287,46 +306,50 @@ function renderInventory(data) {
     });
 }
 
+let closeInventoryInfo = null;
 function showInventoryInfoPopup(item) {
     const popup = document.getElementById('inventoryInfoPopup');
     const overlay = document.getElementById('inventoryInfoOverlay');
     if (!popup || !overlay) return;
 
-    const INFO_SVG = '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="color:currentColor"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/><path d="M12 17V12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="8" r="0.75" fill="currentColor"/></svg>';
-
-    let h = '<div class="info-title">' + INFO_SVG + ' ' + (item.name || 'Unknown').toUpperCase() + '</div>';
-    h += '<div class="info-desc">';
-    if (item.imageUrl) h += '<img src="' + item.imageUrl + '" alt="">';
-    h += '<span>' + (item.description || 'No description available.') + '</span>';
-    h += '</div>';
-
-    const tags = item.tags || [];
-    if (tags.length > 0) {
-        h += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px;border-top:1px solid rgba(96,108,124,0.5);padding-top:8px;">';
-        for (const tag of tags) {
-            h += '<span style="font-size:9px;padding:2px 8px;border-radius:10px;background:rgba(118,193,209,0.15);color:rgba(118,193,209,1);border:1px solid rgba(118,193,209,0.3);">' + tag + '</span>';
-        }
-        h += '</div>';
-    }
-
-    h += '<div class="info-specs">';
-    if (item.tier) h += '<div class="info-spec-item"><div class="info-spec-label">Rarity</div><div class="info-spec-val">' + itemTierLabel(item.tier) + '</div></div>';
-    if (item.sellPrice) h += '<div class="info-spec-item"><div class="info-spec-label">Sell Price</div><div class="info-spec-val">' + item.sellPrice.toLocaleString() + '</div></div>';
-    if (item.canCraft) h += '<div class="info-spec-item"><div class="info-spec-label">Craftable</div><div class="info-spec-val">Yes</div></div>';
-    if (item.canUse) h += '<div class="info-spec-item"><div class="info-spec-label">Usable</div><div class="info-spec-val">Yes</div></div>';
-    h += '</div>';
-
-    _safeSetHtml(popup, h);
+    closeInventoryInfo?.();
+    const previousFocus = document.activeElement;
+    const closeButton = _h('button', { type: 'button', className: 'info-close-btn', 'aria-label': 'Close item information' }, '✕');
+    const specs = [];
+    if (item.tier) specs.push(['Rarity', itemTierLabel(item.tier)]);
+    if (item.sellPrice) specs.push(['Sell price', item.sellPrice.toLocaleString() + ' CR']);
+    if (item.canCraft) specs.push(['Craftable', 'Yes']);
+    if (item.canUse) specs.push(['Usable', 'Yes']);
+    popup.replaceChildren(
+        _h('div', { className: 'info-title' }, _h('span', null, item.name || 'Unknown item'), closeButton),
+        _h('div', { className: 'info-desc' }, item.imageUrl ? _h('img', { src: item.imageUrl, alt: '' }) : null,
+            _h('span', null, item.description || 'No description available.')),
+        _h('div', { className: 'info-tags' }, ...(item.tags || []).map(tag => _h('span', null, String(tag)))),
+        _h('div', { className: 'info-specs' }, ...specs.map(([label, value]) => _h('div', { className: 'info-spec-item' },
+            _h('div', { className: 'info-spec-label' }, label), _h('div', { className: 'info-spec-val' }, value))))
+    );
     popup.classList.add('open');
     overlay.classList.add('open');
-    const close = () => { popup.classList.remove('open'); overlay.classList.remove('open'); overlay.removeEventListener('click', close); };
+    const close = () => {
+        popup.classList.remove('open'); overlay.classList.remove('open'); overlay.removeEventListener('click', close);
+        popup.removeEventListener('keydown', onKey); closeInventoryInfo = null; previousFocus?.focus();
+    };
+    function onKey(event) {
+        if (event.key === 'Escape') close();
+        if (event.key === 'Tab') { event.preventDefault(); closeButton.focus(); }
+    }
+    closeInventoryInfo = close;
+    closeButton.addEventListener('click', close);
+    popup.addEventListener('keydown', onKey);
     overlay.addEventListener('click', close);
+    closeButton.focus();
 }
 
 export function initInventoryStorageListener() {
     chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== 'local') return;
         if (changes.stashData) { loadInventory(); loadSpecialistTimers(); refreshAllTimestamps(); }
+        if (changes.protectedInventoryRules) loadInventory();
         if (changes.specialistsData) { loadSpecialistTimers(); }
     });
 }

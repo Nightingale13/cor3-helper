@@ -1,8 +1,9 @@
 // Expedition-related functions: request, respond, archive, mercs, launch, mail
 import { USOL_MARKET_ID, USOL_SERVER_ID } from './state.js';
-import { wsSend, enterRooms, humanDelay, queueRetryOp } from './ws-send.js';
+import { wsSend, enterRooms, sendJoin, humanDelay } from './ws-send.js';
 import { safeTimeout as setTimeout, safeClearTimeout as clearTimeout } from '../shared/ws-utils.js';
 import { requestOptions } from './request-control.js';
+import { reportActivity } from '../shared/activity-event.js';
 import { __cor3FetchMapData, __cor3FindPathsToServer, __cor3EnsureServerAccess, __cor3WaitForMsg, __cor3PostUnreachable } from './market-requests.js';
 
 var DEFAULT_LOCATION_NAMES = ['Skylift Remains', 'Koute Mining and Reprocessing Outpost'];
@@ -34,9 +35,16 @@ window.__cor3DownloadFolderId = null;
 // Send expedition request through any open tracked socket
 // Read explicitly even when the player already owns the subscription. Waiting
 // for a room-join snapshot can hang, and passive reads must not pause with navigation.
-window.__cor3RequestExpeditions = function (requestId) {
-    const options = requestOptions(requestId);
+window.__cor3RequestExpeditions = function (requestId, urgent = false) {
+    const options = { ...requestOptions(requestId), urgent };
     console.log('[COR3 Helper] Requesting expedition data');
+    if (urgent) {
+        // Empty update notifications need a fresh reading of the decision,
+        // ahead of passive refreshes and without a room-join delay.
+        sendJoin('expeditions', { urgent: true });
+        wsSend('42["event",{"event":{"name":"expeditions","action":"get.active"},"data":{}}]', options);
+        return true;
+    }
     enterRooms(['expeditions']).then(function () {
         wsSend('42["event",{"event":{"name":"expeditions","action":"get.active"},"data":{}}]', options);
     });
@@ -44,7 +52,7 @@ window.__cor3RequestExpeditions = function (requestId) {
 };
 
 // Send decision response via WS
-window.__cor3RespondDecision = function (expeditionId, messageId, selectedOption) {
+window.__cor3RespondDecision = function (expeditionId, messageId, selectedOption, requestId) {
     var payload = JSON.stringify({
         expeditionId: expeditionId,
         messageId: messageId,
@@ -52,12 +60,7 @@ window.__cor3RespondDecision = function (expeditionId, messageId, selectedOption
     });
     var msg = '42["event",{"event":{"name":"expeditions","action":"respond.event"},"data":' + payload + '}]';
     console.log('[COR3 Helper] Sending decision response:', selectedOption);
-    var sent = wsSend(msg);
-    if (!sent) {
-        // Queue for retry if socket is down (token-expired)
-        queueRetryOp('decision:' + payload);
-    }
-    return sent;
+    return wsSend(msg, { ...requestOptions(requestId), urgent: true });
 };
 
 // Request archived expeditions
@@ -479,13 +482,19 @@ window.__cor3LaunchExpedition = function (configData, requestId, keepCreditReser
     function doConfigureAndLaunch() {
         if (options.cancelled?.()) return;
         var configureMsg = '42["event",{"event":{"name":"expeditions","action":"configure"},"data":' + JSON.stringify(configData) + '}]';
+        let quotedCost = null;
         function launch() { setTimeout(function () {
             var launchMsg = '42["event",{"event":{"name":"expeditions","action":"launch"},"data":' + JSON.stringify(configData) + '}]';
-            wsSend(launchMsg, options);
+            wsSend(launchMsg, { ...options, onResponse(payload, request) {
+                if (!request.ambiguous && !payload.error && payload.data?.id) reportActivity({ kind: 'mercenaryLaunch',
+                    id: 'mercenary-launch:' + payload.data.id, cost: quotedCost });
+            } });
             console.log('[COR3 Helper] Expedition launch sent');
         }, humanDelay() + 500); }
         if (!keepCreditReserve) {
-            wsSend(configureMsg, options);
+            wsSend(configureMsg, { ...options, onResponse(quote, request) {
+                if (!request.ambiguous && !quote.error && Number.isFinite(quote.data?.totalCost)) quotedCost = quote.data.totalCost;
+            } });
             launch();
             return;
         }
@@ -499,6 +508,7 @@ window.__cor3LaunchExpedition = function (configData, requestId, keepCreditReser
                 invalidBudget(); return;
             }
             const requiredCredits = quote.data.totalCost + 2000;
+            quotedCost = quote.data.totalCost;
             const balanceMsg = '42' + JSON.stringify(['event', {
                 event: { name: 'market', action: 'get.options' }, data: { marketId }
             }]);

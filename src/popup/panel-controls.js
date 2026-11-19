@@ -1,7 +1,6 @@
 // --- Pop Out / Side Panel ---
 import { getCor3Tab } from './utils.js';
 
-const statusDiv = document.getElementById('status');
 const popOutBtn = document.getElementById('popOutBtn');
 const sidePanelBtn = document.getElementById('sidePanelBtn');
 
@@ -45,6 +44,8 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
     addCard([helperDiv, pinned].filter(Boolean));
 
     addCard([mainView.querySelector('.toggles-section')].filter(Boolean));
+    addCard([document.getElementById('dailyOpsSection')].filter(Boolean));
+    addCard([document.getElementById('activitySummarySection')].filter(Boolean));
 
     addCard([document.getElementById('autoJobSolverSection')].filter(Boolean));
 
@@ -52,38 +53,12 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
 
     const allSections = mainView.querySelectorAll(':scope > .section');
 
-    for (const s of allSections) {
-        if (s.textContent.includes('Daily Ops') && !s.querySelector('#marketContainer')) {
-            addCard([s]);
-            break;
-        }
-    }
-
     let marketsSection = null;
     for (const s of allSections) {
         if (s.querySelector('#marketContainer')) { marketsSection = s; break; }
     }
     if (marketsSection) {
-        wrappedEls.add(marketsSection);
-        const mTitle = marketsSection.querySelector(':scope > .section-title');
-        const subSections = marketsSection.querySelectorAll(':scope > .sub-section');
-        const overlays = [
-            marketsSection.querySelector('#marketInfoOverlay'),
-            marketsSection.querySelector('#marketInfoPopup')
-        ].filter(Boolean);
-
-        if (subSections.length > 0) {
-            const firstGroup = [mTitle, subSections[0]].filter(Boolean);
-            if (subSections.length === 1) firstGroup.push(...overlays);
-            addCard(firstGroup);
-            for (let mi = 1; mi < subSections.length; mi++) {
-                const group = [subSections[mi]];
-                if (mi === subSections.length - 1) group.push(...overlays);
-                addCard(group);
-            }
-        } else {
-            addCard([marketsSection]);
-        }
+        addCard([marketsSection]);
     }
 
     let expeditionsSection = null;
@@ -97,10 +72,10 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
         wrappedEls.add(expeditionsSection);
         const expChildren = Array.from(expeditionsSection.children);
         const splitPoints = [
+            { id: 'decisionsSectionToggle', label: 'Expedition Decisions' },
             { id: 'personalDroneSectionToggle', label: 'Drone Expeditions' },
-            { id: 'decisionsSectionToggle', label: 'Decisions' },
+            { id: 'mercenariesSectionToggle', label: 'Mercenary Expeditions' },
             { id: 'inventorySectionToggle', label: 'Inventory' },
-            { id: 'mercenariesSectionToggle', label: 'Mercenaries' },
             { id: 'archivedExpSectionToggle', label: 'Archived' }
         ];
         const splitIndices = [];
@@ -132,22 +107,7 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
         }
     }
     if (loadoutSection) {
-        wrappedEls.add(loadoutSection);
-        const ldChildren = Array.from(loadoutSection.children);
-        const swToggleIdx = ldChildren.findIndex(el => el.querySelector('#loadoutSwToggle') || el.id === 'loadoutSwToggle');
-        const ovToggleIdx = ldChildren.findIndex(el => el.querySelector('#loadoutOverviewToggle') || el.id === 'loadoutOverviewToggle');
-        const ldSplits = [swToggleIdx, ovToggleIdx].filter(i => i >= 0).sort((a, b) => a - b);
-
-        if (ldSplits.length > 0) {
-            addCard(ldChildren.slice(0, ldSplits[0]));
-            for (let li = 0; li < ldSplits.length; li++) {
-                const start = ldSplits[li];
-                const end = li + 1 < ldSplits.length ? ldSplits[li + 1] : ldChildren.length;
-                addCard(ldChildren.slice(start, end));
-            }
-        } else {
-            addCard([loadoutSection]);
-        }
+        addCard([loadoutSection]);
     }
 
     for (const s of allSections) {
@@ -162,13 +122,9 @@ const sidePanelBtn = document.getElementById('sidePanelBtn');
     if (vi) { const p = vi.closest('div[style*="border-top"]'); if (p) versionEls.push(p); }
     const cb = document.getElementById('checkUpdateBtn');
     if (cb) { const p = cb.closest('div[style*="text-align:center"]'); if (p) versionEls.push(p); }
-    const st = document.getElementById('status');
-    if (st) versionEls.push(st);
     addCard(versionEls);
 
-    if (marketsSection) marketsSection.remove();
     if (expeditionsSection) expeditionsSection.remove();
-    if (loadoutSection) loadoutSection.remove();
 
     const remaining = Array.from(mainView.children).filter(
         el => !wrappedEls.has(el) && el !== headerRow && !el.classList.contains('theme-dropdown') && el !== grid
@@ -201,11 +157,11 @@ if (sidePanelBtn) {
     sidePanelBtn.addEventListener('click', async () => {
         try {
             const tab = await getCor3Tab();
-            if (!tab) { statusDiv.textContent = 'No cor3.gg tab found.'; return; }
+            if (!tab) { sidePanelBtn.title = 'Open cor3.gg to use the side panel.'; return; }
             await chrome.sidePanel.open({ tabId: tab.id });
             window.close();
         } catch (e) {
-            statusDiv.textContent = 'Side panel not supported in this browser.';
+            sidePanelBtn.title = 'Side panel not supported in this browser.';
         }
     });
 }

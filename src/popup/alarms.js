@@ -17,7 +17,6 @@ const alarmSeconds = document.getElementById('alarmSeconds');
 const alarmContinuous = document.getElementById('alarmContinuous');
 const alarmVolumeSlider = document.getElementById('alarmVolume');
 const alarmVolumeLabel = document.getElementById('alarmVolumeLabel');
-const statusDiv = document.getElementById('status');
 
 let alarms = [];
 let editingAlarmId = null;
@@ -215,7 +214,6 @@ stopAllAlarmsBtn.addEventListener('click', async () => {
 chrome.runtime.onMessage.addListener((request) => {
     if (request.action === "alarmActiveStatus") {
         stopAllAlarmsBtn.style.display = request.isActive ? '' : 'none';
-        statusDiv.textContent = request.isActive ? 'Alarm sounding...' : 'Ready';
     }
 });
 

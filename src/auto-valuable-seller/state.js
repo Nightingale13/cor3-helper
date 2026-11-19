@@ -6,6 +6,7 @@ import { humanDelay, createSendCmd, createDelay, createWaitForEvent, createLogge
 import { createWaitForHackToBeDone, ensureDecryptSolverEnabled, ensureIceWallSolverEnabled, ensureSimpleDecryptSolverEnabled } from '../shared/hack-utils.js';
 import { MARKET_SELL_ORDER as SHARED_MARKET_SELL_ORDER } from '../shared/server-constants.js';
 import { FALLBACK_PATH_MAP, FALLBACK_SERVER_PRIORITY } from '../shared/server-map.js';
+import { commandProgress, reportProgress } from '../shared/automation-progress.js';
 
 // ---- Running / abort state ----
 export var running = false;
@@ -43,7 +44,12 @@ export var _forceMaintenanceRunning = false;
 export function setForceMaintenanceRunning(v) { _forceMaintenanceRunning = v; }
 
 // ---- Wired utility instances ----
-export var sendCmd = createSendCmd('COR3_AUTOJOB_CMD', 'auto-valuable');
+const sendValuableCommand = createSendCmd('COR3_AUTOJOB_CMD', 'auto-valuable');
+export var sendCmd = function (command, data) {
+    const message = commandProgress(command);
+    if (message) reportProgress('valuables', message);
+    sendValuableCommand(command, data);
+};
 export var delay = createDelay(isAborted);
 export var waitForEvent = createWaitForEvent(isAborted);
 export var log = createLogger('[COR3 ValuableSeller]', 'COR3_VALUABLE_LOG');
